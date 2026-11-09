@@ -44,7 +44,14 @@ python3 kit/tools/make_kit.py vmgauge     # -> dist/mgu-custom-apps.tar.gz
 
 ## Установка
 
-Windows (root SSH к головному устройству через ENET, ключ из idrive7-8-ssh-root):
+Одна команда (скачает репозиторий, извлечёт SDK с машины, соберёт и установит). Требуются
+на ноутбуке Python 3, Node.js и OpenSSH-клиент:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/daniloz095/vmgauge/main/deploy/install.ps1))) -HostName <IP-головки> -KeyPath <путь-к-id_rsa>
+```
+
+Или из клона репозитория (SDK уже извлечён в `./oap-sdk/`, сборка готова в `dist/`):
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
