@@ -1,0 +1,805 @@
+{
+  "id": "vmgauge",
+  "title": "VMGauge",
+  "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
+  "version": "0.1.1",
+  "vendor": "custom",
+  "loggingId": "OAA1",
+  "iconGlyph": "gauge",
+  "signals": {
+    "de.bmw.infotainment.vehicle.CDS": {
+      "statusEngineSpeed2": "rs",
+      "statusEngineTemperature": "rs"
+    },
+    "de.bmw.infotainment.vehicle.Vehicle2": {
+      "statusCarSpeed2": "rs"
+    },
+    "de.bmw.infotainment.drivingexcitement.FES": {
+      "statusActualValueTorque2": "rs"
+    },
+    "com.harman.infotainment.systemfunctions.tasu.tasu.InternalTasu": {
+      "_instances": "SystemFunctionsInternalTasuInst1",
+      "_methods": [
+        "sendTasuRequest"
+      ],
+      "_broadcasts": [
+        "sendTasuResponse"
+      ]
+    }
+  },
+  "screens": [
+    {
+      "name": "MAIN",
+      "kind": "canvas",
+      "title": "VMGauge",
+      "buttons": [
+        [
+          "BTN_SETTINGS",
+          "Settings"
+        ]
+      ]
+    }
+  ],
+  "settings": [
+    {
+      "key": "boostSource",
+      "label": "Boost from",
+      "type": "choice",
+      "default": "auto",
+      "options": [
+        [
+          "auto",
+          "Auto"
+        ],
+        [
+          "fes",
+          "Sport display"
+        ],
+        [
+          "dme",
+          "Engine unit (DME)"
+        ]
+      ]
+    },
+    {
+      "key": "boostMax",
+      "label": "Boost gauge max",
+      "type": "number",
+      "unit": "bar",
+      "default": 2.5,
+      "steps": [
+        1.5,
+        2.0,
+        2.5,
+        3.0,
+        3.5
+      ]
+    },
+    {
+      "key": "pollMs",
+      "label": "Engine unit poll every",
+      "type": "number",
+      "unit": "ms",
+      "default": 1000,
+      "steps": [
+        500,
+        1000,
+        2000,
+        5000
+      ]
+    },
+    {
+      "key": "demo",
+      "label": "Demo mode",
+      "type": "choice",
+      "default": "auto",
+      "options": [
+        [
+          "auto",
+          "Auto"
+        ],
+        [
+          "on",
+          "On"
+        ],
+        [
+          "off",
+          "Off"
+        ]
+      ]
+    },
+    {
+      "key": "language",
+      "label": "Язык / Language",
+      "type": "choice",
+      "default": "en",
+      "options": [
+        [
+          "en",
+          "English"
+        ],
+        [
+          "ru",
+          "Русский"
+        ]
+      ]
+    },
+    {
+      "key": "unitsTemp",
+      "label": "Temperature unit",
+      "type": "choice",
+      "default": "C",
+      "options": [
+        [
+          "C",
+          "°C"
+        ],
+        [
+          "F",
+          "°F"
+        ]
+      ]
+    },
+    {
+      "key": "speedUnits",
+      "label": "Speed unit",
+      "type": "choice",
+      "default": "kmh",
+      "options": [
+        [
+          "kmh",
+          "km/h"
+        ],
+        [
+          "mph",
+          "mph"
+        ]
+      ]
+    },
+    {
+      "key": "showUnits",
+      "label": "Show units on tiles",
+      "type": "bool",
+      "default": false
+    },
+    {
+      "key": "peakResetMs",
+      "label": "Peak reset interval",
+      "type": "number",
+      "unit": "ms",
+      "default": 6000,
+      "steps": [
+        3000,
+        6000,
+        10000,
+        30000,
+        60000
+      ]
+    }
+  ],
+  "config": {
+    "scaling": {
+      "rpm": {
+        "factor": 0.25,
+        "offset": 0,
+        "invalid": 65535
+      },
+      "speed": {
+        "factor": 0.015625,
+        "offset": 0,
+        "invalid": 65535
+      },
+      "engineTemp": {
+        "factor": 1,
+        "offset": -48,
+        "invalid": 255
+      },
+      "boostFes": {
+        "factor": 0.01,
+        "offset": 0,
+        "invalid": 255,
+        "note": "sport display boost; calibrate against a known reading; raw values go to the log ('raw FES boost')"
+      }
+    },
+    "dme": {
+      "ecu": 18,
+      "_elecComment": "alternatorMaxA = nominal max output current for the ALT LOAD % tile (B58 water-cooled alternator ~170A; change per car)",
+      "flapPos": [
+        {
+          "did": "0464",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 0,
+          "max": 100,
+          "note": "exhaust flap position % open (probe on car; raw logged if implausible)"
+        },
+        {
+          "did": "529F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 0,
+          "max": 100,
+          "note": "reserve flap-position DID candidate"
+        }
+      ],
+      "flapCmd": [
+        {
+          "did": "0464",
+          "valueOpen": "01",
+          "valueClose": "00",
+          "note": "UDS 0x2F InputOutputControl Klappe candidate 1 (DME8FF)"
+        },
+        {
+          "did": "0465",
+          "valueOpen": "01",
+          "valueClose": "00",
+          "note": "candidate 2 - probe order on car"
+        }
+      ],
+      "iat": [
+        {
+          "did": "580F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.75,
+          "offset": -48,
+          "min": -40,
+          "max": 150,
+          "note": "ITANS Ansaugluft-Temperatur, deg C"
+        },
+        {
+          "did": "529A",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "note": "KRAFTSTOFFQUALITAET (Bosch HFM fuel-quality sensor reading, raw). NOT a real fuel-quality metric: on B58 it typically tracks intake-air temperature. Read-only probe, harmless; listed here so its raw value lands in the log for cross-checking against ITANS."
+        },
+        {
+          "did": "F40F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "note": "OBD PID 0x0F intake air temperature"
+        },
+        {
+          "obd": "0F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150
+        }
+      ],
+      "exhaust": [
+        {
+          "did": "5896",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.1,
+          "offset": -273.14,
+          "min": -40,
+          "max": 1100,
+          "note": "TEMP_NACH_KAT_MODELL exhaust temperature after main catalyst (model)"
+        },
+        {
+          "did": "582F",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.1,
+          "offset": -273.14,
+          "min": -40,
+          "max": 1100,
+          "note": "TEMP_ABGAS_NACH_KAT_MODELL, same figure, older id"
+        },
+        {
+          "did": "579B",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.1,
+          "offset": -273.14,
+          "min": -40,
+          "max": 1100,
+          "note": "ABGTEMP_KRUEM_AMOT_BANK1 particulate filter temperature bank 1 (a hotter point; last try)"
+        }
+      ],
+      "oilPressAbs": [
+        {
+          "did": "586F",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 0.2,
+          "max": 12,
+          "note": "OELDRUCK, hPa -> bar (absolute)"
+        },
+        {
+          "did": "4436",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 0.2,
+          "max": 12,
+          "note": "I_DRUCK_OEL_IST_ABS, hPa -> bar (absolute)"
+        }
+      ],
+      "baro": [
+        {
+          "did": "F433",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 50,
+          "max": 115,
+          "note": "OBD PID 0x33 barometric pressure, kPa (101.3 when not available)"
+        },
+        {
+          "obd": "33",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 50,
+          "max": 115,
+          "note": "OBD service 01 PID 0x33 (same as F433)"
+        }
+      ],
+      "boost": [
+        {
+          "did": "F470",
+          "bytes": 2,
+          "at": 3,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD PID 0x70 boost pressure control: actual boost pressure sensor A (absolute), 1/32 kPa"
+        },
+        {
+          "did": "F487",
+          "bytes": 2,
+          "at": 1,
+          "factor": 0.03125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "OBD PID 0x87 intake manifold absolute pressure sensor A, 1/32 kPa"
+        },
+        {
+          "did": "F40B",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 20,
+          "max": 255,
+          "note": "OBD PID 0x0B intake manifold absolute pressure, kPa (max 255 = 1.5 bar boost)"
+        },
+        {
+          "obd": "0B",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 20,
+          "max": 255,
+          "note": "OBD service 01 PID 0x0B (same as F40B)"
+        }
+      ],
+      "lambda": [
+        {
+          "did": "5889",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.000244140625,
+          "offset": 0,
+          "min": 0.4,
+          "max": 1.6,
+          "note": "ILAG1 Lambda-Istwert group 1"
+        },
+        {
+          "did": "5640",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.000244140625,
+          "offset": 0,
+          "min": 0.4,
+          "max": 1.6,
+          "note": "LAMBDA_SONDE_IST from sensor"
+        },
+        {
+          "obd": "24",
+          "bytes": 2,
+          "at": 0,
+          "factor": 3.05e-05,
+          "offset": 0,
+          "min": 0.4,
+          "max": 1.6,
+          "note": "OBD PID 0x24 lambda bank 1 sensor 1 ((A*256+B)/32768)"
+        }
+      ],
+      "mixtureAdapt": [
+        {
+          "did": "4A9D",
+          "bytes": 2,
+          "at": 0,
+          "factor": 3.0517578e-05,
+          "offset": 0,
+          "min": 0.5,
+          "max": 1.5,
+          "note": "KORR_MULT_GEMISCHADAP multiplicative mixture adaptation correction (1.0 = learned nothing)"
+        }
+      ],
+      "knockRetard": [
+        {
+          "did": "554C",
+          "bytes": 1,
+          "at": 0,
+          "signed": true,
+          "factor": 0.375,
+          "offset": 0,
+          "min": -40,
+          "max": 0,
+          "note": "MITTELW_ZYLIND_ZWSPAET_KR_HALBQUANT mean ignition retard by knock control, deg CA (0 = no knock pulling timing out)"
+        }
+      ],
+      "loadDirect": [
+        {
+          "did": "5813",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.75,
+          "offset": 0,
+          "min": 0,
+          "max": 191.25,
+          "note": "BMW actual relative air charge, % = raw * 0.75"
+        }
+      ],
+      "misfire": {
+        "tid": "0C",
+        "note": "OBD service 06, MIDs A2.. = cylinders 1..; tid 0C = this driving cycle (0B = average of the last 10). Set to {} to switch off."
+      },
+      "fuelPresAct": [
+        {
+          "did": "F423",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": 0,
+          "min": 0,
+          "max": 500,
+          "note": "fuel rail gauge pressure (direct injection), 10 kPa per bit"
+        },
+        {
+          "did": "F459",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": -1,
+          "min": 0,
+          "max": 500,
+          "note": "fuel rail absolute pressure, 10 kPa per bit"
+        },
+        {
+          "obd": "23",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": 0,
+          "min": 0,
+          "max": 500,
+          "note": "OBD service 01 PID 0x23 (same as F423)"
+        }
+      ],
+      "fuelPresReq": [
+        {
+          "did": "4184",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 20,
+          "max": 400,
+          "note": "DRUCKRAIL_SOLL requested rail pressure, hPa -> bar (candidate; verify on car)"
+        },
+        {
+          "did": "4439",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 20,
+          "max": 400,
+          "note": "alternative SOLL DID candidate"
+        }
+      ],
+      "ignAdv": [
+        {
+          "obd": "0E",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.5,
+          "offset": -64,
+          "min": -64,
+          "max": 63.5,
+          "note": "OBD service 01 PID 0x0E timing advance, degrees before TDC (cylinder 1)"
+        },
+        {
+          "did": "F40E",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.5,
+          "offset": -64,
+          "min": -64,
+          "max": 63.5,
+          "note": "the same PID over UDS 0x22"
+        }
+      ],
+      "fuelTemp": [
+        {
+          "did": "449D",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.1,
+          "offset": 0,
+          "min": -40,
+          "max": 80,
+          "note": "TEMP_KRAFTSTOFF fuel temperature, tenths of deg C (candidate; verify on car)"
+        },
+        {
+          "did": "5639",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 80,
+          "note": "alternative raw+40 encoding candidate"
+        }
+      ],
+      "thermoPos": [
+        {
+          "did": "5893",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0015259022,
+          "offset": 0,
+          "min": 0,
+          "max": 100,
+          "note": "STELLGRAD Kuehlmittelventil/thermostat valve position, raw/65536*100 -> % open (candidate; verify DID/scale on car)"
+        },
+        {
+          "did": "447F",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.3921568627,
+          "offset": 0,
+          "min": 0,
+          "max": 100,
+          "note": "alternative: duty %, raw/255*100"
+        }
+      ],
+      "fanRpm": [
+        {
+          "did": "5873",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.25,
+          "offset": 0,
+          "min": 0,
+          "max": 9000,
+          "note": "LUEFTER_DREHZAHL electric coolant fan speed, rpm (candidate; some DMEs report duty 0-100 instead - check the logged raw value)"
+        },
+        {
+          "did": "4457",
+          "bytes": 1,
+          "at": 0,
+          "factor": 39.21568627,
+          "offset": 0,
+          "min": 0,
+          "max": 9000,
+          "note": "fan duty %, raw/255*100 -> scaled to a nominal 0..10000 rpm axis for display"
+        }
+      ],
+      "radTemp": [
+        {
+          "did": "5815",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -48,
+          "min": -40,
+          "max": 130,
+          "note": "TEMP_KUHLKREIS_VORLAUF radiator outlet / circuit supply temp, deg C (candidate)"
+        },
+        {
+          "did": "4431",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 130,
+          "note": "alternative raw+40 encoding candidate"
+        }
+      ],
+      "gearbox": [
+        {
+          "ecu": 24,
+          "did": "6000",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 160,
+          "note": "ZF 8HP _GETRIEBEOELTEMPERATUR, deg C + 40"
+        },
+        {
+          "ecu": 24,
+          "did": "DA12",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -48,
+          "min": -40,
+          "max": 160,
+          "note": "EGS transmission oil temperature; only shown once it changes"
+        }
+      ],
+      "voltage": [
+        {
+          "did": "5853",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 8,
+          "max": 17,
+          "note": "BATT_SPANNUNG IBS battery voltage, V"
+        },
+        {
+          "obd": "42",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 8,
+          "max": 17,
+          "note": "OBD PID 0x42 control module voltage, mV -> V"
+        }
+      ],
+      "battCurrent": [
+        {
+          "did": "5854",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.001,
+          "offset": 0,
+          "min": -200,
+          "max": 200,
+          "note": "IBS_STROM battery current via the intelligent boost sensor, A (charge positive; candidate - check sign/scale in the log)"
+        }
+      ],
+      "aluIst": [
+        {
+          "did": "4469",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.001,
+          "offset": 0,
+          "min": 0,
+          "max": 250,
+          "note": "ALU_IST_LI or ALU_IST actual alternator load current, A (DID candidate; verify on car)"
+        },
+        {
+          "did": "589C",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 0,
+          "max": 250,
+          "note": "alternative raw-ampere candidate"
+        }
+      ],
+      "aluTemp": [
+        {
+          "did": "58A1",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 150,
+          "note": "alternator/regulator temperature raw+40 encoding (candidate; many B58 DMEs do not expose it -> tile stays '--')"
+        }
+      ],
+      "_tcaseComment": "tcClutchRaw: transfer-case clutch duty/system-torque DID candidates (ECU 26 = xDrive/ATCD). DIDs below are guesses; probe on car. If none resolve, the app falls back to a derived lock-up estimate from slip+accel.",
+      "tcClutchRaw": [
+        {
+          "did": "58F0",
+          "bytes": 2,
+          "at": 0,
+          "factor": 1,
+          "offset": 0,
+          "min": 0,
+          "max": 4000,
+          "note": "clutch solenoid current candidate, mA (ECU 26 xDrive; verify on car)",
+          "ecu": 26
+        },
+        {
+          "did": "58F1",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.1,
+          "offset": 0,
+          "min": 0,
+          "max": 100,
+          "note": "alternative: lock-up percent directly, raw/10",
+          "ecu": 26
+        }
+      ],
+      "loadTarget": [
+        {
+          "did": "480C",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0234375,
+          "offset": 0,
+          "min": 0,
+          "max": 250,
+          "note": "BMW requested relative air charge, % = raw * 0.75 / 32"
+        }
+      ],
+      "oil": [
+        {
+          "obd": "5C",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 170,
+          "note": "engine oil temperature, OBD service 01 PID 0x5C - only read while the car's own signal (CDS) sends none"
+        },
+        {
+          "did": "F45C",
+          "bytes": 1,
+          "at": 0,
+          "factor": 1,
+          "offset": -40,
+          "min": -40,
+          "max": 170
+        }
+      ]
+    },
+    "elec": {
+      "alternatorMaxA": 170,
+      "note": "nominal max alternator output current (B58 water-cooled unit ~170A); used for the ALT LOAD % tile on the ELECTRIC tab"
+    },
+    "tcase": {
+      "clutchMaxMa": 2000,
+      "lockCapPct": 100
+    }
+  }
+}
