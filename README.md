@@ -22,12 +22,25 @@ DID к DME, КПП и раздатке. Масштабирование и спи
 | **LAP** | лаг-таймер: 0-100 / 0-200 / 100-200, live-метрики и максимумы |
 | **MORE** | boost-шкала с пиком, детект коррекций КПП, логи CSV |
 
-## Сборка
+## Сборка (локально)
+
+Сборка нуждается в **`oap-sdk`** — это проприетарный код BMW, поэтому его **нет в репозитории**
+и его **нельзя публиковать**. Он извлекается один раз с вашего собственного головного устройства:
 
 ```sh
-python3 kit/tools/build.py vmgauge          # -> dist/vmgauge@<version>.mgu
-python3 kit/tools/make_kit.py vmgauge       # -> dist/mgu-custom-apps.tar.gz (кит для машины)
+# 1) скопировать приложение-донор (x_call — есть на любой MGU):
+scp root@<IP>:'/usr/lib/oap-mainapp/preinstalled_apps/x_call@*.tgz' .
+mkdir x_call && tar xzf x_call@*.tgz -C x_call
+
+# 2) извлечь SDK в ./oap-sdk/:
+node kit/tools/extract_sdk.js x_call/javascript/app.js
+
+# 3) собрать:
+python3 kit/tools/build.py vmgauge        # -> dist/vmgauge@<version>.mgu
+python3 kit/tools/make_kit.py vmgauge     # -> dist/mgu-custom-apps.tar.gz
 ```
+
+`oap-sdk/` и `dist/` в `.gitignore` — собранные артефакты и SDK никогда не коммитятся.
 
 ## Установка
 
@@ -38,8 +51,6 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\deploy\push-to-car.ps1 install -Key <путь-к-id_rsa> -Ip <IP-головки>
 ```
 
-Либо через **mgu-store**: Store → Settings → Add source → `daniloz095/vmgauge` (Releases).
-
 ## Калибровка DID
 
 Не все DID подтверждены на конкретной машине. Причина отказа видна в логе приложения
@@ -48,6 +59,5 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ## Атрибуция
 
-Собрано на фреймворке **idrive7-apps** (kit) — https://github.com/cauliflowermossgrape/idrive7-apps.
-SDK (`oap-sdk`) — проприетарный код BMW, извлекается с собственного головного устройства
-(`kit/tools/extract_sdk.js`) и в репозиторий не коммитится.
+Собрано на фреймворке **idrive7-apps** (kit) — https://github.com/cauliflowermossgrape/idrive7-apps
+(лицензия GPL-3.0, см. `LICENSE`).
