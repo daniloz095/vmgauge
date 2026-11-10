@@ -24,14 +24,12 @@ $opts = @('-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=NUL','-o','Ba
 $target = "root@$HostName"
 
 $remote = @(
-    'echo "===== VMGAUGE APP LOG ====="',
-    'find /var/opt/public/oap -name vmgauge.log -exec cat {} \; 2>/dev/null',
-    'echo',
-    'echo "===== INSTALLED APPS ====="',
+    'echo ===== VMGAUGE-APP-LOG =====',
+    'cat /var/opt/public/oap/oap_*/data/vmgauge.log 2>/dev/null',
+    'echo ===== INSTALLED-APPS =====',
     'cd /var/opt/mgu-custom-apps 2>/dev/null && sh mgu-app-install.sh list 2>/dev/null',
-    'echo',
-    'echo "===== SYSTEM LOG (filtered) ====="',
-    'logread 2>/dev/null | grep -iE "vmgauge|oap_12|oapcontroller|OAA1" | tail -300'
+    'echo ===== SYSTEM-LOG =====',
+    'logread 2>/dev/null | grep -i vmgauge | tail -200'
 ) -join '; '
 
 Write-Host "Collecting logs from $target ..."
