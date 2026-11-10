@@ -89,11 +89,17 @@ mgu.run({
                 fail[metric] = (fail[metric] || 0) + 1;
                 const c = list[rd.pick[metric] || 0] || list[0];
                 const r = rd.raws[rd.key(c)];
-                if (r && !r.logged && fail[metric] === 1) { r.logged = true; log.info('DID ' + metric + ': ' + (r.why || 'no value')); }
+                if (r && !r.rawLogged) { r.rawLogged = true; const lbl = c.obd ? 'OBD ' + String(c.obd).toUpperCase() : c.did; log.info('DID ' + metric + ' [' + lbl + ']: ' + (r.bytes || r.why)); }
                 return;
             }
             fail[metric] = 0;
             v[metric] = val;
+            // log the raw reply + computed value once per candidate, for calibration
+            {
+                const c = list[rd.pick[metric] || 0] || list[0];
+                const r = rd.raws[rd.key(c)];
+                if (r && !r.rawLogged) { r.rawLogged = true; const lbl = c.obd ? 'OBD ' + String(c.obd).toUpperCase() : c.did; log.info('DID ' + metric + ' [' + lbl + ']: ' + (r.bytes || r.why) + ' = ' + val); }
+            }
             if (metric === 'oilPressAbs') v.oilPress = num(val) && num(baro) ? val - baro / 100 : null;
         }
         function pollLoop() { pollDme().then(() => setTimeout(pollLoop, 250)).catch(() => setTimeout(pollLoop, 250)); }
