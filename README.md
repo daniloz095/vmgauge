@@ -58,6 +58,30 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\deploy\push-to-car.ps1 install -Key <путь-к-id_rsa> -Ip <IP-головки>
 ```
 
+## Удаление (откат к стоку)
+
+```powershell
+.\deploy\push-to-car.ps1 restore -Key <путь-к-id_rsa> -Ip <IP-головки>
+```
+
+(просит набрать `YES` в терминале). То же напрямую на ГУ:
+`ssh root@<IP> "cd /var/opt/mgu-custom-apps && sh deploy-car.sh restore"`. Остальные команды
+на ГУ: `sh deploy-car.sh status`, `sh deploy-car.sh backups`.
+
+## Установка через MGU Store (магазин на экране)
+
+Можно ставить/обновлять/удалять прямо на экране машины через
+[MGU Store](https://github.com/robertnisipeanu/mgu-store). Сначала один раз ставится сам Store:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/robertnisipeanu/mgu-store/main/deploy/install.ps1))) first-install --identity <путь-к-id_rsa>
+```
+
+Затем на машине: **Store → Settings → Add source → `daniloz095/vmgauge` → Branch `main` → Install**.
+Store собирает приложение прямо на ГУ (нужен интернет в машине), SDK берёт из стокового
+приложения-донора — проприетарный код BMW в репозиторий не попадает. Удалить Store и всё,
+что он ставил: та же команда с `uninstall` вместо `first-install`.
+
 ## Калибровка DID
 
 Не все DID подтверждены на конкретной машине. Причина отказа видна в логе приложения
