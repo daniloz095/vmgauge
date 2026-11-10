@@ -96,7 +96,7 @@ mgu.run({
             v[metric] = val;
             if (metric === 'oilPressAbs') v.oilPress = num(val) && num(baro) ? val - baro / 100 : null;
         }
-        function pollLoop() { pollDme().finally(() => setTimeout(pollLoop, 250)); }
+        function pollLoop() { pollDme().then(() => setTimeout(pollLoop, 250)).catch(() => setTimeout(pollLoop, 250)); }
         pollLoop();
 
         /* ---------------- derived values ---------------- */
