@@ -37,6 +37,8 @@ param(
 $ErrorActionPreference = 'Continue'
 # GitHub requires TLS 1.2+; older PowerShell may negotiate TLS 1.0/1.1.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+# allow running the deploy scripts (push-to-car.ps1) from this process
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force } catch { }
 
 function Write-Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Fail($m)       { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
