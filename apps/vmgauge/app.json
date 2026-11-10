@@ -2,7 +2,7 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
@@ -281,7 +281,7 @@
           "max": 150
         }
       ],
-      "exhaust": [
+      "egt": [
         {
           "did": "5896",
           "bytes": 2,
@@ -570,9 +570,9 @@
           "at": 0,
           "factor": 1,
           "offset": -40,
-          "min": -40,
+          "min": -39,
           "max": 80,
-          "note": "alternative raw+40 encoding candidate"
+          "note": "alternative raw+40 encoding candidate (raw 0 = no sensor -> shown as --)"
         }
       ],
       "thermoPos": [
@@ -636,9 +636,9 @@
           "at": 0,
           "factor": 1,
           "offset": -40,
-          "min": -40,
+          "min": -39,
           "max": 130,
-          "note": "alternative raw+40 encoding candidate"
+          "note": "alternative raw+40 encoding candidate (raw 0 = no sensor -> shown as --)"
         }
       ],
       "gearbox": [
@@ -709,17 +709,7 @@
           "offset": 0,
           "min": 0,
           "max": 250,
-          "note": "ALU_IST_LI or ALU_IST actual alternator load current, A (DID candidate; verify on car)"
-        },
-        {
-          "did": "589C",
-          "bytes": 1,
-          "at": 0,
-          "factor": 1,
-          "offset": 0,
-          "min": 0,
-          "max": 250,
-          "note": "alternative raw-ampere candidate"
+          "note": "ALU_IST_LI actual alternator load current, A (DID candidate; verify on car - 589C was NOT current, it answered 1)"
         }
       ],
       "aluTemp": [
@@ -732,31 +722,6 @@
           "min": -40,
           "max": 150,
           "note": "alternator/regulator temperature raw+40 encoding (candidate; many B58 DMEs do not expose it -> tile stays '--')"
-        }
-      ],
-      "_tcaseComment": "tcClutchRaw: transfer-case clutch duty/system-torque DID candidates (ECU 26 = xDrive/ATCD). DIDs below are guesses; probe on car. If none resolve, the app falls back to a derived lock-up estimate from slip+accel.",
-      "tcClutchRaw": [
-        {
-          "did": "58F0",
-          "bytes": 2,
-          "at": 0,
-          "factor": 1,
-          "offset": 0,
-          "min": 0,
-          "max": 4000,
-          "note": "clutch solenoid current candidate, mA (ECU 26 xDrive; verify on car)",
-          "ecu": 26
-        },
-        {
-          "did": "58F1",
-          "bytes": 2,
-          "at": 0,
-          "factor": 0.1,
-          "offset": 0,
-          "min": 0,
-          "max": 100,
-          "note": "alternative: lock-up percent directly, raw/10",
-          "ecu": 26
         }
       ],
       "loadTarget": [
@@ -797,9 +762,21 @@
       "alternatorMaxA": 170,
       "note": "nominal max alternator output current (B58 water-cooled unit ~170A); used for the ALT LOAD % tile on the ELECTRIC tab"
     },
-    "tcase": {
-      "clutchMaxMa": 2000,
-      "lockCapPct": 100
+    "xdrive": {
+      "comment": "Front axle torque straight from the transfer case unit (LMV, address 0x19 = 25). LMV_MOMENT (22 DB32): actual torque to the front axle, signed, Nm = raw / 4 (bytes 0-1). The proven M Vitals source.",
+      "front": [
+        {
+          "ecu": 25,
+          "did": "DB32",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.25,
+          "signed": true,
+          "min": -200,
+          "max": 2500,
+          "note": "LMV_MOMENT.ISTMOMENT, actual torque to the front axle"
+        }
+      ]
     }
   }
 }
