@@ -2,7 +2,7 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
@@ -363,6 +363,26 @@
       ],
       "boost": [
         {
+          "did": "4205",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0078125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "IPLAD charge pressure before throttle, hPa (raw * 1/128) -> kPa"
+        },
+        {
+          "did": "4A2D",
+          "bytes": 2,
+          "at": 0,
+          "factor": 0.0078125,
+          "offset": 0,
+          "min": 20,
+          "max": 600,
+          "note": "DRUCK_ABS_SAUGROHR manifold absolute pressure, hPa -> kPa"
+        },
+        {
           "did": "F470",
           "bytes": 2,
           "at": 3,
@@ -383,16 +403,6 @@
           "note": "OBD PID 0x87 intake manifold absolute pressure sensor A, 1/32 kPa"
         },
         {
-          "did": "F40B",
-          "bytes": 1,
-          "at": 0,
-          "factor": 1,
-          "offset": 0,
-          "min": 20,
-          "max": 255,
-          "note": "OBD PID 0x0B intake manifold absolute pressure, kPa (max 255 = 1.5 bar boost)"
-        },
-        {
           "obd": "0B",
           "bytes": 1,
           "at": 0,
@@ -400,7 +410,7 @@
           "offset": 0,
           "min": 20,
           "max": 255,
-          "note": "OBD service 01 PID 0x0B (same as F40B)"
+          "note": "OBD service 01 PID 0x0B (caps at 255 kPa = 1.55 bar boost)"
         }
       ],
       "lambda": [
@@ -510,24 +520,24 @@
       ],
       "fuelPresReq": [
         {
-          "did": "4184",
+          "did": "56C1",
           "bytes": 2,
           "at": 0,
-          "factor": 0.001,
+          "factor": 0.02,
           "offset": 0,
-          "min": 20,
-          "max": 400,
-          "note": "DRUCKRAIL_SOLL requested rail pressure, hPa -> bar (candidate; verify on car)"
+          "min": 0.5,
+          "max": 40,
+          "note": "S_RAILDRUCKREGELUNG_NEU rail pressure setpoint, MPa -> bar (DME8FF_R)"
         },
         {
-          "did": "4439",
+          "did": "5837",
           "bytes": 2,
           "at": 0,
-          "factor": 0.001,
+          "factor": 0.005,
           "offset": 0,
-          "min": 20,
-          "max": 400,
-          "note": "alternative SOLL DID candidate"
+          "min": 0.5,
+          "max": 40,
+          "note": "S_RAILDRUCKREGELUNG rail pressure setpoint, MPa -> bar"
         }
       ],
       "ignAdv": [
@@ -554,6 +564,16 @@
       ],
       "fuelTemp": [
         {
+          "did": "4AD5",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.75,
+          "offset": -48,
+          "min": -40,
+          "max": 80,
+          "note": "TEMP_KRAFTSTOFF fuel temperature, deg C (DME8FF_R)"
+        },
+        {
           "did": "449D",
           "bytes": 2,
           "at": 0,
@@ -562,17 +582,7 @@
           "offset": 0,
           "min": -40,
           "max": 80,
-          "note": "TEMP_KRAFTSTOFF fuel temperature, tenths of deg C (candidate; verify on car)"
-        },
-        {
-          "did": "5639",
-          "bytes": 1,
-          "at": 0,
-          "factor": 1,
-          "offset": -40,
-          "min": -39,
-          "max": 80,
-          "note": "alternative raw+40 encoding candidate (raw 0 = no sensor -> shown as --)"
+          "note": "alternative fuel-temperature DID"
         }
       ],
       "thermoPos": [
@@ -621,6 +631,16 @@
       ],
       "radTemp": [
         {
+          "did": "5890",
+          "bytes": 1,
+          "at": 0,
+          "factor": 0.75,
+          "offset": -48,
+          "min": -40,
+          "max": 130,
+          "note": "TEMP_MOTOR_KUEHLERAUSG_KUEHLM radiator output / circuit supply coolant temp, deg C (DME8FF_R)"
+        },
+        {
           "did": "5815",
           "bytes": 1,
           "at": 0,
@@ -628,17 +648,7 @@
           "offset": -48,
           "min": -40,
           "max": 130,
-          "note": "TEMP_KUHLKREIS_VORLAUF radiator outlet / circuit supply temp, deg C (candidate)"
-        },
-        {
-          "did": "4431",
-          "bytes": 1,
-          "at": 0,
-          "factor": 1,
-          "offset": -40,
-          "min": -39,
-          "max": 130,
-          "note": "alternative raw+40 encoding candidate (raw 0 = no sensor -> shown as --)"
+          "note": "alternative radiator DID (may be air mass on some DMEs)"
         }
       ],
       "gearbox": [
@@ -689,39 +699,39 @@
       ],
       "battCurrent": [
         {
-          "did": "5854",
+          "did": "5852",
           "bytes": 2,
           "at": 0,
-          "signed": true,
-          "factor": 0.001,
-          "offset": 0,
+          "factor": 0.02,
+          "offset": -200,
           "min": -200,
           "max": 200,
-          "note": "IBS_STROM battery current via the intelligent boost sensor, A (charge positive; candidate - check sign/scale in the log)"
+          "note": "BATT_STROM battery current via the IBS, A (negative = discharging; DME8FF_R)"
         }
       ],
       "aluIst": [
         {
-          "did": "4469",
+          "did": "4604",
           "bytes": 2,
           "at": 0,
-          "factor": 0.001,
+          "signed": true,
+          "factor": 0.125,
           "offset": 0,
-          "min": 0,
-          "max": 250,
-          "note": "ALU_IST_LI actual alternator load current, A (DID candidate; verify on car - 589C was NOT current, it answered 1)"
+          "min": -50,
+          "max": 400,
+          "note": "IIGEN generator output current, A (DME8FF_R)"
         }
       ],
       "aluTemp": [
         {
-          "did": "58A1",
+          "did": "5854",
           "bytes": 1,
           "at": 0,
-          "factor": 1,
-          "offset": -40,
+          "factor": 0.75,
+          "offset": -48,
           "min": -40,
-          "max": 150,
-          "note": "alternator/regulator temperature raw+40 encoding (candidate; many B58 DMEs do not expose it -> tile stays '--')"
+          "max": 90,
+          "note": "BATT_TEMP battery (IBS) temperature, deg C (DME8FF_R) - shown on the ELEC tab"
         }
       ],
       "loadTarget": [

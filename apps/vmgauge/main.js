@@ -30,10 +30,11 @@ mgu.run({
         const counters = { knock: 0 };
         const power = { hp: null, nm: null, peakHp: null, peakNm: null, peakAt: 0, stamp: 0, hist: [], lastPush: 0 };
         const fuelHist = [], fuelPush = { last: 0 };
+        const ignHist = [], ignPush = { last: 0 };
         let prevKnock = false;
         const boostPeak = { peak: null, peakAt: 0 };
 
-        // lap timer: armed by default, starts the moment the car moves
+        // lap timer: disarmed by default; ARM arms it, then it starts the moment the car moves
         const lap = { state: 'idle', startedAt: 0, crossed: {}, t100_200: null, maxes: {}, btnRect: null };
         let lapEma = null;
         const LAP_TARGETS = [100, 200];
@@ -52,7 +53,7 @@ mgu.run({
         const xcfg = Object.assign({ front: [] }, spec.xdrive || {});
         const link = new Diag(ctx.signals, log);
         link.quiet = true;
-        const rd = new DidReader(link, { ecu: dme.ecu });
+        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 1200 });
         link.init().catch((e) => log.warn('diag init: ' + e));
 
         let baro = 101.3, baroT = 0;
@@ -66,15 +67,15 @@ mgu.run({
 
         // Every DID metric; 'tcase' reads the transfer case (xcfg.front), not the DME.
         const ALL = ['oilPressAbs', 'boost', 'iat', 'egt', 'lambda', 'mixtureAdapt', 'knockRetard',
-            'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp', 'thermoPos',
-            'fanRpm', 'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
+            'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp',
+            'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
         // The values the current tab shows, polled fast (~2-3/s) so nothing looks frozen.
         const TAB_METRICS = {
             main: ['boost', 'oilPressAbs', 'lambda', 'iat', 'gearbox', 'voltage', 'egt', 'loadDirect'],
             power: ['loadDirect', 'boost'],
             hpfp: ['fuelPresAct', 'fuelPresReq'],
             ign: ['ignAdv', 'knockRetard', 'lambda', 'mixtureAdapt'],
-            fuelcool: ['iat', 'egt', 'gearbox', 'fuelTemp', 'radTemp', 'thermoPos', 'fanRpm'],
+            fuelcool: ['iat', 'egt', 'gearbox', 'fuelTemp', 'radTemp'],
             elec: ['voltage', 'aluIst', 'aluTemp', 'battCurrent'],
             tcase: ['tcase'],
             lap: ['boost', 'fuelPresAct', 'iat', 'egt'],
@@ -143,6 +144,11 @@ mgu.run({
             let l = v.lambda;
             if (num(v.mixtureAdapt)) l *= v.mixtureAdapt;
             return l;
+        };
+        // air/fuel ratio: lambda x 14.7 (stoichiometric for petrol)
+        const afr = () => {
+            const l = currentLambda();
+            return num(l) ? l * 14.7 : null;
         };
         const oilPress = () => num(v.oilPress) ? v.oilPress : null;
         const fuelPresAct = () => num(v.fuelPresAct) ? v.fuelPresAct : null;
@@ -251,7 +257,7 @@ mgu.run({
         function drawMain(cv, t, dd) {
             drawTiles(cv, t, [
                 { label: 'Boost', value: boostBar(), unit: 'bar', decimals: 2, zones: [{ from: 0.05, to: 99, color: 'ok' }] },
-                { label: 'Lambda', value: currentLambda(), decimals: 2 },
+                { label: 'AFR', value: afr(), decimals: 1 },
                 { label: 'Oil pressure', value: oilPress(), unit: 'bar', decimals: 1, zones: [{ from: -99, to: 1.2, color: 'crit' }] },
                 { label: 'Intake air', value: T(v.iat), unit: tU(), decimals: 0, zones: [{ from: T(65), to: 999, color: 'crit' }] },
                 { label: 'Coolant', value: T(dd.coolant), unit: tU(), decimals: 0, zones: [{ from: T(112), to: 999, color: 'crit' }, { from: -99, to: T(60), color: 'cold' }] },
@@ -269,8 +275,8 @@ mgu.run({
             const fresh = num(power.hp) && Date.now() - power.stamp < 3000;
             const hp = fresh ? power.hp : null, nm = fresh ? power.nm : null;
             const barH = 110, gap = 12;
-            G.bar(cv, t, 24, G.TOP, 1552, barH, { label: 'Power', value: hp, unit: 'hp', decimals: 0, niceMax: true, ramp: 'hot', peak: power.peakHp });
-            G.bar(cv, t, 24, G.TOP + barH + gap, 1552, barH, { label: 'Torque', value: nm, unit: 'Nm', decimals: 0, niceMax: true, peak: power.peakNm });
+            G.bar(cv, t, 24, G.TOP, 1552, barH, { label: 'Power', value: hp, unit: 'hp', decimals: 0, min: 0, max: 600, ramp: 'hot', peak: power.peakHp });
+            G.bar(cv, t, 24, G.TOP + barH + gap, 1552, barH, { label: 'Torque', value: nm, unit: 'Nm', decimals: 0, min: 0, max: 600, peak: power.peakNm });
             const y = G.TOP + 2 * (barH + gap), h = G.BOTTOM - y;
             const now = Date.now(), t0 = now - 30000;
             const hs = power.hist.filter((p) => p.t >= t0);
@@ -309,12 +315,26 @@ mgu.run({
         }
 
         function drawIgn(cv, t, dd) {
-            drawTiles(cv, t, [
-                { label: 'Ignition timing', value: num(v.ignAdv) ? v.ignAdv : null, unit: '°', decimals: 1, sub: num(v.ignAdv) ? 'before TDC, cyl 1' : fuelWhy('ignAdv') },
-                { label: 'Knock retard', value: num(v.knockRetard) ? v.knockRetard : null, unit: '°', decimals: 1, zones: [{ from: -99, to: -0.5, color: 'warn' }] },
-                { label: 'Lambda', value: currentLambda(), decimals: 3 },
-                { label: 'Mixture adapt', value: num(v.mixtureAdapt) ? v.mixtureAdapt : null, decimals: 3 },
-            ]);
+            // top: the two live values
+            const th = Math.round((G.BOTTOM - G.TOP) * 0.34);
+            const w2 = Math.round((1552 - 24) / 2);
+            G.stat(cv, t, 24, G.TOP, w2, th, { label: 'Ignition timing', value: num(v.ignAdv) ? v.ignAdv : null, unit: '°', decimals: 1, sub: num(v.ignAdv) ? 'before TDC, cyl 1' : fuelWhy('ignAdv') });
+            G.stat(cv, t, 24 + w2 + 24, G.TOP, w2, th, { label: 'Knock retard', value: num(v.knockRetard) ? v.knockRetard : null, unit: '°', decimals: 1, zones: [{ from: -99, to: -0.5, color: 'warn' }] });
+            // bottom: ignition angle (0-45) and rpm (0-7500, scaled to the same axis)
+            const y = G.TOP + th + 16, h = G.BOTTOM - y;
+            const now = Date.now(), t0 = now - 30000;
+            const hs = ignHist.filter((p) => p.t >= t0);
+            cv.text('IGNITION ° (0-45)  ·  RPM (0-7500, scaled)', 40, y + 18, 18, t.dim, { font: 'bold', spacing: 1 });
+            G.chart(cv, t, 24, y + 24, 1552, h - 24, {
+                xMin: t0, xMax: now, yMin: 0, yMax: 45,
+                xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
+                yUnit: '°', yFmt: (yy) => String(Math.round(yy)),
+                series: [
+                    { pts: hs.map((p) => [p.t, p.ign]), color: 'accent', width: 2.5, fill: 0.12 },
+                    { pts: hs.map((p) => [p.t, p.rpm * 45 / 7500]), color: '#3aa0ff', width: 2, dash: true },
+                ],
+                empty: 'no ignition data',
+            });
         }
 
         function drawFuelCool(cv, t, dd) {
@@ -332,8 +352,8 @@ mgu.run({
             drawTiles(cv, t, [
                 { label: 'Voltage', value: v.voltage, unit: 'V', decimals: 1, zones: [{ from: -99, to: 12, color: 'warn' }, { from: 15.5, to: 99, color: 'warn' }] },
                 { label: 'Alt load', value: alternatorLoadPct(), unit: '%', decimals: 0, sub: num(alternatorLoadPct()) ? 'alternator output' : fuelWhy('aluIst') },
-                { label: 'Output', value: alternatorOutputA(), unit: 'A', decimals: 0, sub: num(alternatorOutputA()) ? 'alternator current' : fuelWhy('aluIst') },
-                { label: 'Alt temp', value: T(v.aluTemp), unit: tU(), decimals: 0, sub: num(v.aluTemp) ? undefined : fuelWhy('aluTemp') },
+                { label: 'Output', value: alternatorOutputA(), unit: 'A', decimals: 0, sub: num(alternatorOutputA()) ? 'generator current' : fuelWhy('aluIst') },
+                { label: 'Batt temp', value: T(v.aluTemp), unit: tU(), decimals: 0, sub: num(v.aluTemp) ? 'battery (IBS)' : fuelWhy('aluTemp') },
             ]);
         }
 
@@ -350,7 +370,7 @@ mgu.run({
             const s = num(dd.speed) ? dd.speed : null;
             if (num(s)) lapEma = lapEma === null ? s : lapEma + (s - lapEma) * 0.5;
             lap.curSpeed = lapEma;
-            if (lap.state === 'idle' && num(lapEma) && lapEma >= 3) {
+            if (lap.state === 'armed' && num(lapEma) && lapEma >= 3) {
                 lap.state = 'running'; lap.startedAt = Date.now();
                 lap.crossed = {}; lap.t100_200 = null; lap.maxes = {}; lapEma = null;
                 log.info('lap started');
@@ -365,8 +385,9 @@ mgu.run({
         }
         function lapToggle() {
             if (lap.state === 'running') { lap.state = 'done'; log.info('lap stopped'); return; }
+            if (lap.state === 'armed') { lap.state = 'idle'; lapEma = null; log.info('lap disarmed'); return; }
             // idle / done -> arm (results cleared, starts on the next movement)
-            lap.state = 'idle'; lap.crossed = {}; lap.t100_200 = null; lap.maxes = {}; lapEma = null; lap.startedAt = 0;
+            lap.state = 'armed'; lap.crossed = {}; lap.t100_200 = null; lap.maxes = {}; lapEma = null; lap.startedAt = 0;
             log.info('lap armed (starts when the car moves)');
         }
         function drawLap(cv, t, dd) {
@@ -404,9 +425,14 @@ mgu.run({
             // arm / stop button
             const btnW = 260, btnH = 64, bx = 800 - btnW / 2, by = G.BOTTOM - btnH - 20;
             lap.btnRect = [bx, by, btnW, btnH];
-            cv.roundRect(bx, by, btnW, btnH, 14, running ? t.crit : '#1aa05a');
-            cv.text(running ? 'STOP' : 'ARM', bx + btnW / 2, by + btnH / 2 + 9, 28, '#ffffff', { align: 'center', font: 'bold' });
-            const status = running ? 'REC ' + el.toFixed(1) + ' s' : lap.state === 'done' ? 'run complete' : 'armed — starts when the car moves';
+            const btnLabel = running ? 'STOP' : lap.state === 'armed' ? 'CANCEL' : lap.state === 'done' ? 'RESET' : 'ARM';
+            const btnCol = running ? t.crit : lap.state === 'armed' ? '#e8a020' : '#1aa05a';
+            cv.roundRect(bx, by, btnW, btnH, 14, btnCol);
+            cv.text(btnLabel, bx + btnW / 2, by + btnH / 2 + 9, 28, '#ffffff', { align: 'center', font: 'bold' });
+            const status = running ? 'REC ' + el.toFixed(1) + ' s'
+                : lap.state === 'done' ? 'run complete'
+                : lap.state === 'armed' ? 'armed — will start when the car moves'
+                : 'press ARM, then drive off';
             cv.text(status, bx + btnW / 2, by - 18, 20, t.dim, { align: 'center' });
         }
 
@@ -464,6 +490,17 @@ mgu.run({
             lapStep(dd);
             boostGaugeStep();
             loggingStep(dd);
+            // ignition angle + rpm history for the IGN chart
+            {
+                const now = Date.now();
+                if (now - ignPush.last > 200 && (num(v.ignAdv) || num(dd.rpm))) {
+                    ignPush.last = now;
+                    ignHist.push({ t: now, ign: num(v.ignAdv) ? v.ignAdv : 0, rpm: num(dd.rpm) ? dd.rpm : 0 });
+                    const cutoff = now - 30000;
+                    while (ignHist.length && ignHist[0].t < cutoff) ignHist.shift();
+                    if (ignHist.length > 600) ignHist.splice(0, ignHist.length - 600);
+                }
+            }
             const cv = ctx.canvas(W, H).clear(t.bg);
             switch (gTab) {
                 case 'main': drawMain(cv, t, dd); break;
@@ -483,9 +520,19 @@ mgu.run({
 
         ctx.onTab((i) => { if (i >= 0 && i < TABS.length) gTab = TABS[i].id; });
         const inRect = (r, x, y) => r && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
+        let lastBtnTap = 0;
         ctx.onTap((x, y) => {
-            if (gTab === 'lap' && inRect(lap.btnRect, x, y)) { lapToggle(); return; }
+            if (gTab === 'lap' && inRect(lap.btnRect, x, y)) {
+                const now = Date.now();
+                if (now - lastBtnTap < 300) return;   // ignore repeated taps from a held finger
+                lastBtnTap = now;
+                lapToggle();
+                return;
+            }
             if (gTab === 'more' && inRect(logState.btnRect, x, y)) {
+                const now = Date.now();
+                if (now - lastBtnTap < 300) return;
+                lastBtnTap = now;
                 logState.active = !logState.active;
                 logState.rows = 0;
                 log.info(logState.active ? 'logging on' : 'logging off');
