@@ -150,12 +150,7 @@ mgu.run({
             for (;;) {
                 const now = Date.now();
                 if (link.available) {
-                    // misfire monitor: slow (~once a second)
-                    if (now - misfireAt >= 1000) {
-                        misfireAt = now;
-                        try { await readMisfire(); } catch (e) { /* transport */ }
-                    }
-                    // the most-overdue DID metric
+                    // the most-overdue DID metric (priority, so fast metrics stay fast)
                     let best = null, bestDue = Infinity;
                     for (let i = 0; i < ALL.length; i++) {
                         const m = ALL[i], dd = due[m] || 0;
@@ -164,6 +159,11 @@ mgu.run({
                     if (best) {
                         due[best] = now + rateOf(best);
                         try { await readMetric(best); } catch (e) { log.warn('poll ' + best + ': ' + e); }
+                        // misfire monitor: slow, only after a DID read, and only every ~2 s
+                        if (Date.now() - misfireAt >= 2000) {
+                            misfireAt = Date.now();
+                            try { await readMisfire(); } catch (e) { /* transport */ }
+                        }
                         continue;
                     }
                 }
