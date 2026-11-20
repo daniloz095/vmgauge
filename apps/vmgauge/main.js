@@ -10,6 +10,7 @@ const { Diag } = require('./kit/diag');
 const { DidReader } = require('./kit/dids');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const W = 1600, H = 520;
 const num = G.isNum;
@@ -45,6 +46,8 @@ mgu.run({
 
         // CSV logging
         const logState = { active: false, rows: 0, lastRowAt: 0, btnRect: null };
+        // GitHub log upload
+        const uploadState = { busy: false, status: '', btnRect: null };
 
         /* ---------------- signals (Car) ---------------- */
         const car = new Car(ctx, ['rpm', 'speed', 'temps', 'torque']);
@@ -561,6 +564,12 @@ mgu.run({
             cv.roundRect(bx, by, btnW, btnH, 12, logState.active ? t.crit : '#1aa05a');
             cv.text(logState.active ? 'STOP' : 'REC', bx + btnW / 2, by + btnH / 2 + 8, 26, '#ffffff', { align: 'center', font: 'bold' });
             cv.text('rows: ' + logState.rows + '  →  vmgauge_log.csv', bx, by + btnH + 24, 20, t.dim);
+            // UPLOAD button (posts the CSV to GitHub)
+            const ux = bx + btnW + 20;
+            uploadState.btnRect = [ux, by, btnW, btnH];
+            cv.roundRect(ux, by, btnW, btnH, 12, uploadState.busy ? t.dim : '#3a86ff');
+            cv.text(uploadState.busy ? '…' : 'UPLOAD', ux + btnW / 2, by + btnH / 2 + 8, 26, '#ffffff', { align: 'center', font: 'bold' });
+            cv.text(uploadState.status || 'posts vmgauge_log.csv to GitHub', ux, by + btnH + 24, 20, t.dim);
         }
 
         /* ---------------- CSV logging ---------------- */
@@ -585,6 +594,70 @@ mgu.run({
                 fs.appendFileSync(f, line + '\n');
                 logState.rows++;
             } catch (e) { log.warn('log write: ' + e); }
+        }
+
+        /* ---------------- GitHub log upload ---------------- */
+        function ghUpload(token, repo, branch, remotePath, content) {
+            return new Promise((resolve, reject) => {
+                const body = JSON.stringify({
+                    message: 'vmgauge log upload',
+                    content: Buffer.from(content, 'utf8').toString('base64'),
+                    branch: branch,
+                });
+                const req = https.request({
+                    hostname: 'api.github.com',
+                    path: '/repos/' + repo + '/contents/' + remotePath,
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': 'token ' + token,
+                        'User-Agent': 'vmgauge',
+                        'Accept': 'application/vnd.github+json',
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(body),
+                    },
+                }, (res) => {
+                    let data = '';
+                    res.on('data', (c) => { data += c; });
+                    res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) resolve(data);
+                        else reject(new Error('HTTP ' + res.statusCode + ' ' + data.slice(0, 200)));
+                    });
+                });
+                req.on('error', reject);
+                req.setTimeout(20000, () => { req.destroy(new Error('timeout')); });
+                req.write(body);
+                req.end();
+            });
+        }
+        async function doUpload() {
+            if (uploadState.busy) return;
+            uploadState.busy = true;
+            uploadState.status = 'uploading…';
+            try {
+                const cfg = spec.upload || {};
+                const repo = cfg.repo || 'daniloz095/vmgauge';
+                const branch = cfg.branch || 'main';
+                const dir = (cfg.path || 'logs').replace(/\/+$/, '');
+                const tokenFile = path.join(ctx.dataDir, 'gh_token.txt');
+                const csvFile = path.join(ctx.dataDir, 'vmgauge_log.csv');
+                if (!fs.existsSync(tokenFile)) { uploadState.status = 'no gh_token.txt'; return; }
+                if (!fs.existsSync(csvFile)) { uploadState.status = 'no vmgauge_log.csv yet'; return; }
+                const token = fs.readFileSync(tokenFile, 'utf8').trim();
+                if (!token) { uploadState.status = 'empty token'; return; }
+                const content = fs.readFileSync(csvFile, 'utf8');
+                const d = new Date();
+                const pad = (n) => (n < 10 ? '0' : '') + n;
+                const name = 'vmgauge_' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.csv';
+                const remotePath = dir + '/' + name;
+                await ghUpload(token, repo, branch, remotePath, content);
+                uploadState.status = 'uploaded ' + name;
+                log.info('log uploaded to ' + repo + '/' + remotePath);
+            } catch (e) {
+                uploadState.status = 'upload failed';
+                log.warn('upload: ' + (e && e.message || e));
+            } finally {
+                uploadState.busy = false;
+            }
         }
 
         /* ---------------- render ---------------- */
@@ -655,6 +728,13 @@ mgu.run({
                 logState.active = !logState.active;
                 logState.rows = 0;
                 log.info(logState.active ? 'logging on' : 'logging off');
+                return;
+            }
+            if (gTab === 'more' && inRect(uploadState.btnRect, x, y)) {
+                const now = Date.now();
+                if (now - lastBtnTap < 300) return;
+                lastBtnTap = now;
+                doUpload();
             }
         });
 

@@ -2,10 +2,11 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
+  "internet": true,
   "signals": {
     "de.bmw.infotainment.vehicle.CDS": {
       "statusEngineSpeed2": "rs",
@@ -799,6 +800,12 @@
           "note": "LMV_MOMENT.ISTMOMENT, actual torque to the front axle"
         }
       ]
+    },
+    "upload": {
+      "repo": "daniloz095/vmgauge",
+      "branch": "main",
+      "path": "logs",
+      "note": "UPLOAD button on the MORE tab posts vmgauge_log.csv to this GitHub repo (path) via the Contents API. The token is read from gh_token.txt in the app's data dir (write it once over SSH)."
     }
   }
 }
