@@ -27,10 +27,11 @@ mgu.run({
         ];
         let gTab = 'main';
         const v = {};                          // live DID values
-        const counters = { knock: 0 };
+        const counters = { knock: 0, misfire: 0 };
         const power = { hp: null, nm: null, peakHp: null, peakNm: null, peakAt: 0, stamp: 0, hist: [], lastPush: 0 };
         const fuelHist = [], fuelPush = { last: 0 };
         const ignHist = [], ignPush = { last: 0 };
+        const tcHist = [], tcPush = { last: 0 };   // transfer-case lockup % history (TCASE chart)
         let prevKnock = false;
         const boostPeak = { peak: null, peakAt: 0 };
 
@@ -44,55 +45,178 @@ mgu.run({
         const logState = { active: false, rows: 0, lastRowAt: 0, btnRect: null };
 
         /* ---------------- signals (Car) ---------------- */
-        const car = new Car(ctx, ['rpm', 'speed', 'temps', 'torque']);
+        // extra watch: BasicDataSet's rear-axle torque share (0.01 % per bit, as live_data /
+        // M Vitals read it) - used to compute the xDrive lockup % when DID DB43 is unavailable
+        const car = new Car(ctx, ['rpm', 'speed', 'temps', 'torque'], {
+            'de.bmw.infrastructure.analytics.BasicDataSet': {
+                basicDataSet: (bd) => {
+                    const raw = bd && bd.valueDistributionLongitudinalTorqueRearAxisFrontAxis;
+                    const q = bd && bd.qualifierValueDistributionLongitudinalTorqueRearAxisFrontAxis;
+                    const okQ = q === undefined || q === null || q === 2 || q === 10 ||
+                        q === 'SIGNALWERT_IST_GUELTIG' || q === 'SIGNALWERT_IST_GUELTIG__REKALIBRIERUNGSBEDARF';
+                    if (!okQ || typeof raw !== 'number' || raw === 0 || raw === 65535) return;
+                    const rear = raw * 0.01;
+                    if (rear < 0 || rear > 100) return;
+                    v.rearShare = rear;
+                },
+            },
+        });
         const d = () => car.data();
 
         /* ---------------- DME over UDS ---------------- */
         const spec = ctx.spec.config || {};
         const dme = Object.assign({ ecu: 18 }, spec.dme || {});
-        const xcfg = Object.assign({ front: [] }, spec.xdrive || {});
+        const xcfg = Object.assign({ front: [], lockup: [] }, spec.xdrive || {});
         const link = new Diag(ctx.signals, log);
         link.quiet = true;
-        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 1200 });
+        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 1200, maxConcurrent: 6 });
         link.init().catch((e) => log.warn('diag init: ' + e));
 
-        let baro = 101.3, baroT = 0;
-        async function freshBaro() {
-            if (Date.now() - baroT > 60000) {
-                baroT = Date.now();
-                const b = await rd.value('baro', dme.baro);
-                if (b !== null) baro = b;
-            }
+        let baro = 101.3, baroT = 0, baroBusy = false;
+        function freshBaro() {                                   // never blocks a poll tick
+            if (baroBusy || Date.now() - baroT <= 60000) return Promise.resolve();
+            baroBusy = true; baroT = Date.now();
+            return rd.value('baro', dme.baro)
+                .then((b) => { if (b !== null) baro = b; })
+                .catch(() => {})
+                .then(() => { baroBusy = false; });
         }
 
         // Every DID metric; 'tcase' reads the transfer case (xcfg.front), not the DME.
+        // 'baro' and 'temps' are refreshed by their own schedulers (freshBaro / Car signals),
+        // so they are deliberately not in this list.
         const ALL = ['oilPressAbs', 'boost', 'iat', 'egt', 'lambda', 'mixtureAdapt', 'knockRetard',
-            'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp',
-            'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
-        // The values the current tab shows, polled fast (~2-3/s) so nothing looks frozen.
+            'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp', 'misfire',
+            'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase', 'lockup'];
+        // Poll tiers (Main re-layout): fast ~5/s, medium ~1/s, slow ~1/8s. A metric listed in a
+        // tier keeps that cadence on every tab; anything else refreshes at STALE_BG.
+        const FAST_SET = ['boost', 'mixtureAdapt', 'oilPressAbs', 'fuelPresAct', 'loadDirect'];
+        const MED_SET = ['iat', 'egt', 'gearbox', 'voltage', 'lambda'];
+        const SLOW_SET = ['knockRetard', 'misfire'];
+        // Metrics the current tab draws but that have no explicit tier above: these poll at
+        // MIN_GAP while their tab is open (per-tab fast set).
         const TAB_METRICS = {
-            main: ['boost', 'oilPressAbs', 'lambda', 'iat', 'gearbox', 'voltage', 'egt', 'loadDirect'],
             power: ['loadDirect', 'boost'],
             hpfp: ['fuelPresAct', 'fuelPresReq'],
             ign: ['ignAdv', 'knockRetard', 'lambda', 'mixtureAdapt'],
             fuelcool: ['iat', 'egt', 'gearbox', 'fuelTemp', 'radTemp'],
             elec: ['voltage', 'aluIst', 'aluTemp', 'battCurrent'],
-            tcase: ['tcase'],
+            tcase: ['tcase', 'lockup'],
             lap: ['boost', 'fuelPresAct', 'iat', 'egt'],
             more: ['boost', 'lambda'],
         };
 
         const fail = {}, tried = {}, rawLog = {}, rawCount = {};
-        let fastIdx = 0, slowIdx = 0, tickNo = 0;
+        let tickNo = 0;
+        // misfire reads count as one logical metric (4 cylinders round-robin): the fail/cooldown
+        // bookkeeping is shared across mids, so a refused cylinder doesn't mute the others.
+        function misGated() { return (fail.misfire || 0) >= 3 && Date.now() - (tried.misfire || 0) < 30000; }
 
-        async function readMetric(metric) {
-            const list = metric === 'tcase' ? xcfg.front : dme[metric];
-            if (!Array.isArray(list) || !list.length) return;
-            if ((fail[metric] || 0) >= 3 && Date.now() - (tried[metric] || 0) < 30000) return;
+        // ---- fast polling -------------------------------------------------
+        // The TASU transport takes one UDS request at a time (physical() is serialized in
+        // kit/diag), and each request costs ~150 ms round trip. So instead of waiting for a
+        // reply before sending the next one, every FAST_HZ ticks we dispatch a read without
+        // awaiting it; replies land as they come. Metrics that are due go through first, so
+        // the tiles on the active tab refresh about 5x/s.
+        const FAST_HZ = 12;                  // dispatch rate (~83 ms)
+        const MIN_GAP = 90;                  // fast metrics: don't re-send sooner than this
+        const MED_GAP = 1500;                // medium metrics: ~0.7 update/s (Main's 5 med tiles
+                                             // plus the shared pipe stay under the channel limit)
+        const SLOW_GAP = 8000;               // slow counters (knock): ~1/8 s
+        const MIS_GAP = 2000;                // each misfire cylinder: full sweep of 1-4 every ~2 s
+        const STALE_BG = 4000;               // off-tab metrics: fresh enough for 4 s
+        const bgLast = {};                   // metric -> ts of last completed read
+        const inflight = new Set();          // metrics with a read in flight
+        let qRot = 0;
+
+        function fastSet() {
+            const base = TAB_METRICS[gTab] || [];
+            const extra = [];
+            if ((gTab === 'power' || gTab === 'ign' || gTab === 'lap')) extra.push('loadDirect');
+            if (gTab === 'hpfp') extra.push('boost');
+            // the active tab's tiered metrics go through the same priority queue
+            FAST_SET.concat(MED_SET).concat(SLOW_SET).forEach((m) => {
+                if (ALL.indexOf(m) >= 0 && extra.indexOf(m) < 0 && base.indexOf(m) < 0) extra.push(m);
+            });
+            if (extra.indexOf('misfire') >= 0) extra.splice(extra.indexOf('misfire'), 1);   // handled per cylinder below
+            const seen = {}, out = [];
+            base.concat(extra).forEach((m) => { if (!seen[m]) { seen[m] = true; out.push(m); } });
+            return out;
+        }
+
+        // Poll gap for a metric: explicit tier first (fast/medium/slow on every tab), then
+        // whatever the active tab shows (fast), else background.
+        function gapFor(metric) {
+            if (metric.indexOf('misfire') === 0) return MIS_GAP;    // per cylinder
+            if (FAST_SET.indexOf(metric) >= 0) return MIN_GAP;
+            if (MED_SET.indexOf(metric) >= 0) return MED_GAP;
+            if (SLOW_SET.indexOf(metric) >= 0) return SLOW_GAP;
+            return fastSet().indexOf(metric) >= 0 ? MIN_GAP : STALE_BG;
+        }
+
+        function due(metric, now) {
+            const key = metric.indexOf('misfire') === 0 ? metric : null;   // 'misfire0'..'misfire3'
+            const m = key ? fail.misfire : fail[metric], t = key ? (tried[key] || 0) : (tried[metric] || 0), b = key ? (bgLast[key] || 0) : (bgLast[metric] || 0);
+            if (key ? inflight.has(key) : inflight.has(metric)) return false;
+            if ((m || 0) >= 3 && now - t < 30000) return false;
+            return now - b >= gapFor(metric);
+        }
+
+        // Pipeline instead of a request/reply loop: kit/diag serializes physical() onto one
+        // transport, so we keep up to MAX_INFLIGHT reads in flight and refill as replies land.
+        // The pipe is always full; the queue order decides who gets each free slot, so fast
+        // metrics (tier MIN_GAP) claim most slots and slow ones only what is left over.
+        const MAX_INFLIGHT = 5;
+        let fastRot = 0;
+        function fillPipes() {
+            const now = Date.now();
+            if (inflight.size >= MAX_INFLIGHT) return;
+            const fast = fastSet();
+            const rest = ALL.filter((m) => fast.indexOf(m) < 0);
+            const expand = (list) => {                       // misfire polls as 4 cylinders
+                const out = [];
+                list.forEach((m) => { if (m === 'misfire') for (let c = 0; c < MIS_MIDS.length; c++) out.push('misfire' + c); else out.push(m); });
+                return out;
+            };
+            const fastE = expand(fast), restE = expand(rest);
+            const lists = [fastE, restE], rots = [fastRot, qRot];
+            for (let p = 0; p < 2 && inflight.size < MAX_INFLIGHT; p++) {
+                const L = lists[p];
+                let r = rots[p];
+                for (let k = 0; k < L.length && inflight.size < MAX_INFLIGHT; k++) {
+                    const i = (r + k) % L.length, m = L[i];
+                    if (!due(m, now)) continue;
+                    r = (i + 1) % L.length;
+                    readMetric(m);
+                }
+                rots[p] = r;
+            }
+            fastRot = rots[0]; qRot = rots[1];
+        }
+
+        function readMetric(metric) {
+            if (metric.indexOf('misfire') === 0) {          // dispatched per cylinder: one slow
+                const c = +metric.slice(7);                 // or refused cylinder must not gate the rest
+                if (inflight.has(metric)) return;
+                inflight.add(metric); tried[metric] = Date.now();
+                readMisfires(c).catch((e) => log.warn('poll misfire: ' + e))
+                    .then(() => { inflight.delete(metric); bgLast[metric] = Date.now(); });
+                return;
+            }
+            if (inflight.has(metric)) return;                                  // never double-dispatch
+            inflight.add(metric);
             tried[metric] = Date.now();
+            readMetricNow(metric)
+                .catch((e) => log.warn('poll ' + metric + ': ' + e))
+                .then(() => { inflight.delete(metric); bgLast[metric] = Date.now(); });   // pollTick refills
+        }
+
+        async function readMetricNow(metric) {
+            const list = metric === 'tcase' || metric === 'lockup' ? xcfg[metric] : dme[metric];
+            if (!Array.isArray(list) || !list.length) return;
             let val;
-            if (metric === 'boost') { await freshBaro(); val = await rd.value('boost', dme.boost); if (val !== null) val = (val - baro) / 100; }
-            else if (metric === 'tcase') val = await rd.value('tcase', xcfg.front);
+            if (metric === 'boost') { freshBaro(); val = await rd.value('boost', dme.boost); if (val !== null) val = (val - baro) / 100; }
+            else if (metric === 'tcase' || metric === 'lockup') val = await rd.value(metric, list);
             else val = await rd.value(metric, list);
             // log each candidate's raw reply, at most a few distinct shapes each (for calibration)
             const chosen = rd.pick[metric] || 0;
@@ -115,20 +239,38 @@ mgu.run({
             if (metric === 'oilPressAbs') v.oilPress = num(val) && num(baro) ? val - baro / 100 : null;
         }
 
-        async function pollLoop() {
-            for (;;) {
-                if (link.available) {
-                    tickNo++;
-                    const fast = TAB_METRICS[gTab];
-                    const doSlow = tickNo % 15 === 0;
-                    const queue = (doSlow || !fast || !fast.length) ? ALL : fast;
-                    const idx = doSlow ? slowIdx++ : fastIdx++;
-                    try { await readMetric(queue[idx % queue.length]); } catch (e) { log.warn('poll ' + queue[idx % queue.length] + ': ' + e); }
-                }
-                await new Promise((res) => setTimeout(res, link.available ? 350 : 1000));
+        // Misfires: OBD service 06, mids A2..A5 (cylinders 1-4), tid 0x0C = misfire count.
+        // Like the knock counter it only counts while boosting over 0.5 bar; we watch the
+        // rolling per-revolution ratio (value/min vs value/max) and add every new excess.
+        const MIS_MIDS = [0xA2, 0xA3, 0xA4, 0xA5];
+        const misPrev = {};                    // mid -> last positive { v, min, max }
+        let misFirst = true;
+        async function readMisfires(cyl) {
+            if (misGated()) return;                        // shared cooldown: don't spam a unit that refuses 06
+            const mid = MIS_MIDS[cyl % MIS_MIDS.length];
+            const recs = await rd.monitor(dme.ecu, mid);
+            const r = rd.raws[rd.monitorKey(dme.ecu, mid)];
+            if (r && !r.ok && r.why) log.info('MID ' + mid.toString(16).toUpperCase() + ': ' + r.bytes + ' | ' + r.why);
+            const rec = Array.isArray(recs) ? recs.filter((x) => x.tid === 0x0C)[0] : null;
+            if (!rec) { fail.misfire = (fail.misfire || 0) + 1; return; }
+            fail.misfire = 0;
+            const prev = misPrev[mid];
+            misPrev[mid] = { v: rec.value, min: rec.min, max: rec.max };
+            if (misFirst) misFirst = false;                    // first read only sets the baseline
+            else if (prev && prev.v < rec.value) {             // window advanced since the last read
+                const lo = prev.v - prev.min, hi = rec.value - rec.max;
+                const inc = Math.max(0, hi - Math.max(0, lo));
+                if (num(boostBar()) && boostBar() > 0.5) counters.misfire += inc;
             }
+            v.misfireOk = true;
         }
-        pollLoop();
+
+        function pollTick() {
+            if (!link.available) return;
+            tickNo++;
+            fillPipes();                                                     // fire and forget
+        }
+        setInterval(pollTick, Math.round(1000 / FAST_HZ));
 
         /* ---------------- derived values ---------------- */
         const F = () => settings.get('unitsTemp') === 'F';
@@ -164,6 +306,20 @@ mgu.run({
             if (num(v.battCurrent) && v.battCurrent > 0) return v.battCurrent;
             return null;
         };
+        // xDrive lockup: the LMV's own torque split in % of the total axle torque.
+        // Primary source: DID DB43 (LMV_MOMENT.momentsollverteilung, 0.5 % per bit - the value
+        // the transfer case requests as front share; raw bytes are logged for calibration).
+        // Fallback: computed from the DB32 front torque and the BDS rear-axle share signal.
+        function bdsRearPct() { return num(v.rearShare) ? v.rearShare : null; }
+        function lockupPct() {
+            if (num(v.lockup)) return clamp(v.lockup, 0, 100);
+            const ft = num(v.tcase) ? Math.abs(v.tcase) : null;
+            const rear = bdsRearPct();
+            if (ft === null || ft <= 0 || rear === null) return null;
+            const et = num(lastDd && lastDd.torque) && lastDd.torque > 0 ? lastDd.torque : null;
+            if (et === null) return null;
+            return clamp(ft / (ft + et * (1 - rear / 100)) * 100, 0, 100);
+        }
 
         function computePower(dd) {
             if (!num(dd.rpm) || dd.rpm < 400) return;
@@ -178,7 +334,10 @@ mgu.run({
             power.nm = nm;
             power.hp = kw * 1.35962;         // metric PS
             power.stamp = Date.now();
-            const now = Date.now(), ttl = settings.get('peakResetMs') || 6000;
+            // peak reset: the 'peakResetMs' setting stores seconds (the number stepper's unit
+            // label was changed from ms to s in 0.1.5; old saves hold ms - treat >1000 as ms)
+            const raw = Number(settings.get('peakResetSec'));
+            const ttl = (!isNaN(raw) && raw > 0) ? (raw > 1000 ? raw : raw * 1000) : 6000;
             if (num(power.peakHp) && now - power.peakAt > ttl) { power.peakHp = null; power.peakNm = null; }
             if (!num(power.peakHp) || power.hp > power.peakHp) { power.peakHp = power.hp; power.peakNm = power.nm; power.peakAt = now; }
             if (now - power.lastPush > 200) {
@@ -227,7 +386,13 @@ mgu.run({
         function fuelWhy(k) {
             if (!link.p) return 'no diagnostic link';
             if (!link.available) return 'diagnostic link down';
-            const list = k === 'tcase' ? xcfg.front : dme[k];
+            if (k === 'misfire') {
+                const r = MIS_MIDS.map((mid) => rd.raws[rd.monitorKey(dme.ecu, mid)]).filter(Boolean);
+                if (!r.length) return 'reading misfire counters...';
+                if (r.every((x) => /NRC 31|NRC 11|NRC 12/.test(x.why))) return 'not available on this car';
+                return (r[0].why || 'no data');
+            }
+            const list = (k === 'tcase' || k === 'lockup') ? xcfg[k] : dme[k];
             const r = (list || []).map((c) => rd.raws[rd.key(c)]).filter(Boolean);
             if (!r.length) return 'reading...';
             if (r.every((x) => /NRC 31|NRC 11|NRC 12/.test(x.why))) return 'not available on this car';
@@ -245,29 +410,54 @@ mgu.run({
             }
             return out;
         }
+        /** Centred stat tile: G.stat with center:true (value + unit mid-tile). */
+        function statC(cv, t, x, y, w, h, g) {
+            G.stat(cv, t, x, y, w, h, Object.assign({ center: true }, g));
+        }
         function drawTiles(cv, t, tiles) {
             grid(tiles.length).forEach((b, i) => {
                 const g = tiles[i];
                 if (g && g.draw) g.draw(cv, t, b.x, b.y, b.w, b.h);
-                else if (g) G.stat(cv, t, b.x, b.y, b.w, b.h, Object.assign({ size: b.h > 200 ? 96 : 64 }, g));
+                else if (g) statC(cv, t, b.x, b.y, b.w, b.h, Object.assign({ size: b.h > 200 ? 96 : 64 }, g));
+            });
+        }
+        function drawRowedTiles(cv, t, rows) {
+            const gap = 16, rh = (G.BOTTOM - G.TOP - gap * (rows.length - 1)) / rows.length;
+            rows.forEach((row, r) => {
+                const k = row.length || 1, w = (1552 - 24 * (k - 1)) / k;
+                const x0 = 24 + (1552 - (w * k + 24 * (k - 1))) / 2;
+                const y = G.TOP + r * (rh + gap);
+                // size: value baseline sits at y + 52 + size*0.78 + unit; centre it in the tile
+                const size = Math.max(36, Math.min(64, Math.round((rh - 52 - 28) / 0.78)));
+                row.forEach((g, c) => statC(cv, t, x0 + c * (w + 24), y, w, rh, Object.assign({ size }, g)));
             });
         }
 
         /* ---------------- tabs ---------------- */
+        // Main, three rows of four (fast / medium+slow / mixed cadences — see FAST/MED/SLOW_SET):
+        //  1. boost, AFR (mixture), oil pressure [fast] · knock events [slow]
+        //  2. intake air, EGT [medium] · gearbox oil (SOME/IP) · misfire events [slow]
+        //  3. coolant, engine oil (SOME/IP) · battery voltage [medium] · HPFP rail pressure [fast]
         function drawMain(cv, t, dd) {
-            drawTiles(cv, t, [
-                { label: 'Boost', value: boostBar(), unit: 'bar', decimals: 2, zones: [{ from: 0.05, to: 99, color: 'ok' }] },
-                { label: 'AFR', value: afr(), decimals: 1 },
-                { label: 'Oil pressure', value: oilPress(), unit: 'bar', decimals: 1, zones: [{ from: -99, to: 1.2, color: 'crit' }] },
-                { label: 'Intake air', value: T(v.iat), unit: tU(), decimals: 0, zones: [{ from: T(65), to: 999, color: 'crit' }] },
-                { label: 'Coolant', value: T(dd.coolant), unit: tU(), decimals: 0, zones: [{ from: T(112), to: 999, color: 'crit' }, { from: -99, to: T(60), color: 'cold' }] },
-                { label: 'Engine oil', value: T(dd.oil), unit: tU(), decimals: 0, color: 'oil', zones: [{ from: T(125), to: 999, color: 'crit' }] },
-                { label: 'Gearbox oil', value: T(v.gearbox), unit: tU(), decimals: 0, zones: [{ from: T(120), to: 999, color: 'warn' }] },
-                { label: 'Voltage', value: v.voltage, unit: 'V', decimals: 1, zones: [{ from: -99, to: 12, color: 'warn' }, { from: 15.5, to: 99, color: 'warn' }] },
-                { label: 'Knock count', value: counters.knock, decimals: 0 },
-                { label: 'EGT', value: T(v.egt), unit: tU(), decimals: 0, zones: [{ from: T(950), to: 999, color: 'crit' }] },
-                { label: 'Air charge', value: loadPct(), unit: '%', decimals: 0 },
-                { label: 'Fuel rail', value: fuelPresAct(), unit: 'bar', decimals: 0, zones: [{ from: -99, to: 20, color: 'crit' }] },
+            drawRowedTiles(cv, t, [
+                [
+                    { label: 'Boost', value: boostBar(), unit: 'bar', decimals: 2, zones: [{ from: 0.05, to: 99, color: 'ok' }] },
+                    { label: 'Mixture AFR', value: afr(), decimals: 1 },
+                    { label: 'Oil pressure', value: oilPress(), unit: 'bar', decimals: 1, zones: [{ from: -99, to: 1.2, color: 'crit' }] },
+                    { label: 'Knock events', value: counters.knock, decimals: 0, zones: [{ from: 1, to: 9e9, color: 'crit' }] },
+                ],
+                [
+                    { label: 'Intake air', value: T(v.iat), unit: tU(), decimals: 0, zones: [{ from: T(65), to: 999, color: 'crit' }] },
+                    { label: 'EGT', value: T(v.egt), unit: tU(), decimals: 0, zones: [{ from: T(950), to: 999, color: 'crit' }] },
+                    { label: 'Gearbox oil', value: T(v.gearbox), unit: tU(), decimals: 0, zones: [{ from: T(120), to: 999, color: 'warn' }] },
+                    { label: 'Misfires', value: v.misfireOk ? counters.misfire : null, decimals: 0, zones: [{ from: 1, to: 9e9, color: 'crit' }], sub: v.misfireOk ? undefined : fuelWhy('misfire') },
+                ],
+                [
+                    { label: 'Coolant', value: T(dd.coolant), unit: tU(), decimals: 0, zones: [{ from: T(112), to: 999, color: 'crit' }, { from: -99, to: T(60), color: 'cold' }] },
+                    { label: 'Engine oil', value: T(dd.oil), unit: tU(), decimals: 0, color: 'oil', zones: [{ from: T(125), to: 999, color: 'crit' }] },
+                    { label: 'Voltage', value: v.voltage, unit: 'V', decimals: 1, zones: [{ from: -99, to: 12, color: 'warn' }, { from: 15.5, to: 99, color: 'warn' }] },
+                    { label: 'Rail HPFP', value: fuelPresAct(), unit: 'bar', decimals: 0, zones: [{ from: -99, to: 20, color: 'crit' }] },
+                ],
             ]);
         }
 
@@ -280,10 +470,10 @@ mgu.run({
             const y = G.TOP + 2 * (barH + gap), h = G.BOTTOM - y;
             const now = Date.now(), t0 = now - 30000;
             const hs = power.hist.filter((p) => p.t >= t0);
-            const maxV = Math.max(1, hs.length ? Math.max.apply(null, hs.map((p) => Math.max(p.hp, p.nm))) : 1);
-            const yMax = Math.max(100, Math.ceil(maxV / 50) * 50);
-            G.chart(cv, t, 24, y, 1552, h, {
-                xMin: t0, xMax: now, yMin: 0, yMax,
+            // fixed scale to 600 (hp / Nm), chart compressed to ~2/3 of the width, centered
+            const cw = Math.round(1552 * 0.66), cx = 24 + Math.round((1552 - cw) / 2);
+            G.chart(cv, t, cx, y, cw, h, {
+                xMin: t0, xMax: now, yMin: 0, yMax: 600, yStep: 100,
                 xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
                 yUnit: 'hp · Nm', yFmt: (yy) => String(Math.round(yy)),
                 series: [
@@ -359,10 +549,23 @@ mgu.run({
 
         function drawTcase(cv, t, dd) {
             const ft = num(v.tcase) ? v.tcase : null;
-            drawTiles(cv, t, [
-                { label: 'Front axle torque', value: ft, unit: 'Nm', decimals: 0, sub: num(ft) ? 'transfer case (LMV)' : fuelWhy('tcase') },
-                { label: 'Engine torque', value: num(dd.torque) ? dd.torque : null, unit: 'Nm', decimals: 0, sub: num(dd.torque) ? 'crankshaft' : 'no torque signal' },
-            ]);
+            const lk = lockupPct();
+            const th = Math.round((G.BOTTOM - G.TOP) * 0.34);
+            const w2 = Math.round((1552 - 24) / 2);
+            G.stat(cv, t, 24, G.TOP, w2, th, { label: 'Lockup', value: lk, unit: '%', decimals: 0, center: true, sub: num(lk) ? 'front-axle torque share' : fuelWhy('lockup') });
+            G.stat(cv, t, 24 + w2 + 24, G.TOP, w2, th, { label: 'Front axle torque', value: ft, unit: 'Nm', decimals: 0, center: true, sub: num(ft) ? 'transfer case (LMV)' : fuelWhy('tcase') });
+            // bottom: lockup % over time, same placement as the power chart (2/3 width, centered)
+            const y = G.TOP + th + 16, h = G.BOTTOM - y;
+            const now = Date.now(), t0 = now - 30000;
+            const hs = tcHist.filter((p) => p.t >= t0);
+            const cw = Math.round(1552 * 0.66), cx = 24 + Math.round((1552 - cw) / 2);
+            G.chart(cv, t, cx, y, cw, h, {
+                xMin: t0, xMax: now, yMin: 0, yMax: 100, yStep: 20,
+                xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
+                yUnit: '%', yFmt: (yy) => String(Math.round(yy)),
+                series: [{ pts: hs.map((p) => [p.t, p.pct]), color: 'accent', width: 2.5, fill: 0.14 }],
+                empty: 'no lockup data — drive the car',
+            });
         }
 
         /* ---------------- LAP ---------------- */
@@ -481,15 +684,28 @@ mgu.run({
         }
 
         /* ---------------- render ---------------- */
+        let lastDd = null;
         async function render() {
             const t = ctx.theme();
             const dd = d();
+            lastDd = dd;
             v.rpm = dd.rpm; v.coolant = dd.coolant; v.oilTemp = dd.oil; v.speed = dd.speed;
             computePower(dd);
             handleKnock();
             lapStep(dd);
             boostGaugeStep();
             loggingStep(dd);
+            // lockup % history for the TCASE chart
+            {
+                const nowL = Date.now(), lk = lockupPct();
+                if (num(lk) && nowL - tcPush.last > 200) {
+                    tcPush.last = nowL;
+                    tcHist.push({ t: nowL, pct: lk });
+                    const cut = nowL - 30000;
+                    while (tcHist.length && tcHist[0].t < cut) tcHist.shift();
+                    if (tcHist.length > 600) tcHist.splice(0, tcHist.length - 600);
+                }
+            }
             // ignition angle + rpm history for the IGN chart
             {
                 const now = Date.now();
