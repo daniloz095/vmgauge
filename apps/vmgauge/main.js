@@ -31,6 +31,7 @@ mgu.run({
         const power = { hp: null, nm: null, peakHp: null, peakNm: null, peakAt: 0, stamp: 0, hist: [], lastPush: 0 };
         const fuelHist = [], fuelPush = { last: 0 };
         const ignHist = [], ignPush = { last: 0 };
+        const tcaseHist = [], tcasePush = { last: 0 };
         let prevKnock = false;
         let prevMisfire = null;
         const boostPeak = { peak: null, peakAt: 0 };
@@ -205,6 +206,16 @@ mgu.run({
             if (num(v.aluIst)) return v.aluIst;
             if (num(v.battCurrent) && v.battCurrent > 0) return v.battCurrent;
             return null;
+        };
+        // transfer-case lockup % (0 = clutch open, 100 = fully locked 50/50):
+        // front axle torque against half the engine torque (ignoring the gear ratio).
+        const tcaseLockPct = () => {
+            const ft = num(v.tcase) ? v.tcase : null;
+            if (ft === null) return null;
+            if (ft <= 5) return 0;
+            const eng = num(v.torque) ? v.torque : null;
+            if (!eng || eng <= 0) return null;
+            return clamp(ft / (eng * 0.5) * 100, 0, 100);
         };
 
         function computePower(dd) {
@@ -435,11 +446,23 @@ mgu.run({
         }
 
         function drawTcase(cv, t, dd) {
-            const ft = num(v.tcase) ? v.tcase : null;
-            drawTiles(cv, t, [
-                { label: 'Front axle torque', value: ft, unit: 'Nm', decimals: 0, sub: num(ft) ? 'transfer case (LMV)' : fuelWhy('tcase') },
-                { label: 'Engine torque', value: num(dd.torque) ? dd.torque : null, unit: 'Nm', decimals: 0, sub: num(dd.torque) ? 'crankshaft' : 'no torque signal' },
-            ]);
+            const lock = tcaseLockPct();
+            const th = Math.round((G.BOTTOM - G.TOP) * 0.42);
+            const w2 = Math.round((1552 - 24) / 2);
+            G.stat(cv, t, 24, G.TOP, w2, th, { label: 'Lockup', value: num(lock) ? Math.round(lock) : null, unit: '%', decimals: 0, sub: num(lock) ? 'transfer case clutch' : fuelWhy('tcase') });
+            G.stat(cv, t, 24 + w2 + 24, G.TOP, w2, th, { label: 'Engine torque', value: num(dd.torque) ? dd.torque : null, unit: 'Nm', decimals: 0, sub: num(dd.torque) ? 'crankshaft' : 'no torque signal' });
+            // lockup % over time (2/3 width, centred, like Power/HPFP)
+            const y = G.TOP + th + 16, h = G.BOTTOM - y;
+            const now = Date.now(), t0 = now - 30000;
+            const hs = tcaseHist.filter((p) => p.t >= t0);
+            const chartW = Math.round(1552 * 2 / 3), chartX = 24 + Math.round((1552 - chartW) / 2);
+            G.chart(cv, t, chartX, y, chartW, h, {
+                xMin: t0, xMax: now, yMin: 0, yMax: 100,
+                xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
+                yUnit: '%', yFmt: (yy) => String(Math.round(yy)),
+                series: [{ pts: hs.map((p) => [p.t, p.pct]), color: 'accent', width: 2.5, fill: 0.14 }],
+                empty: 'no lockup data — drive the car',
+            });
         }
 
         /* ---------------- LAP ---------------- */
@@ -561,7 +584,7 @@ mgu.run({
         async function render() {
             const t = ctx.theme();
             const dd = d();
-            v.rpm = dd.rpm; v.coolant = dd.coolant; v.oilTemp = dd.oil; v.speed = dd.speed;
+            v.rpm = dd.rpm; v.coolant = dd.coolant; v.oilTemp = dd.oil; v.speed = dd.speed; v.torque = dd.torque;
             computePower(dd);
             handleKnock();
             handleMisfire();
@@ -577,6 +600,17 @@ mgu.run({
                     const cutoff = now - 30000;
                     while (ignHist.length && ignHist[0].t < cutoff) ignHist.shift();
                     if (ignHist.length > 600) ignHist.splice(0, ignHist.length - 600);
+                }
+            }
+            // transfer-case lockup % history for the TCASE chart
+            {
+                const now = Date.now();
+                if (now - tcasePush.last > 200) {
+                    tcasePush.last = now;
+                    tcaseHist.push({ t: now, pct: tcaseLockPct() });
+                    const cutoff = now - 30000;
+                    while (tcaseHist.length && tcaseHist[0].t < cutoff) tcaseHist.shift();
+                    if (tcaseHist.length > 600) tcaseHist.splice(0, tcaseHist.length - 600);
                 }
             }
             const cv = ctx.canvas(W, H).clear(t.bg);
