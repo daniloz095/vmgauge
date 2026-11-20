@@ -248,8 +248,11 @@ mgu.run({
         async function readMisfires(cyl) {
             if (misGated()) return;                        // shared cooldown: don't spam a unit that refuses 06
             const mid = MIS_MIDS[cyl % MIS_MIDS.length];
-            const recs = await rd.monitor(dme.ecu, mid);
-            const r = rd.raws[rd.monitorKey(dme.ecu, mid)];
+            let recs, r;
+            try {                                          // transport errors must not escape as unhandled rejections
+                recs = await rd.monitor(dme.ecu, mid);
+                r = rd.raws[rd.monitorKey(dme.ecu, mid)];
+            } catch (e) { fail.misfire = (fail.misfire || 0) + 1; return; }
             if (r && !r.ok && r.why) log.info('MID ' + mid.toString(16).toUpperCase() + ': ' + r.bytes + ' | ' + r.why);
             const rec = Array.isArray(recs) ? recs.filter((x) => x.tid === 0x0C)[0] : null;
             if (!rec) { fail.misfire = (fail.misfire || 0) + 1; return; }
@@ -268,7 +271,7 @@ mgu.run({
         function pollTick() {
             if (!link.available) return;
             tickNo++;
-            fillPipes();                                                     // fire and forget
+            try { fillPipes(); } catch (e) { log.warn('fillPipes: ' + e); }   // fire and forget; a dispatch error must never stop the loop
         }
         setInterval(pollTick, Math.round(1000 / FAST_HZ));
 
