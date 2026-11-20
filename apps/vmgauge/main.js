@@ -213,7 +213,7 @@ mgu.run({
 
         async function readMetricNow(metric) {
             const list = metric === 'tcase' || metric === 'lockup' ? xcfg[metric] : dme[metric];
-            if (!Array.isArray(list) || !list.length) return;
+            if (!Array.isArray(list) || !list.length) return;   // no candidates configured (e.g. lockup DB43 dropped until calibrated)
             let val;
             if (metric === 'boost') { freshBaro(); val = await rd.value('boost', dme.boost); if (val !== null) val = (val - baro) / 100; }
             else if (metric === 'tcase' || metric === 'lockup') val = await rd.value(metric, list);
