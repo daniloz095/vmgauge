@@ -220,7 +220,7 @@ mgu.run({
             power.nm = nm;
             power.hp = kw * 1.35962;         // metric PS
             power.stamp = Date.now();
-            const now = Date.now(), ttl = settings.get('peakResetMs') || 6000;
+            const now = Date.now(), ttl = (settings.get('peakResetSec') || 15) * 1000;
             if (num(power.peakHp) && now - power.peakAt > ttl) { power.peakHp = null; power.peakNm = null; }
             if (!num(power.peakHp) || power.hp > power.peakHp) { power.peakHp = power.hp; power.peakNm = power.nm; power.peakAt = now; }
             if (now - power.lastPush > 200) {
@@ -356,7 +356,9 @@ mgu.run({
             const hs = power.hist.filter((p) => p.t >= t0);
             const maxV = Math.max(1, hs.length ? Math.max.apply(null, hs.map((p) => Math.max(p.hp, p.nm))) : 1);
             const yMax = Math.max(100, Math.ceil(maxV / 50) * 50);
-            G.chart(cv, t, 24, y, 1552, h, {
+            // chart at 2/3 width, centred
+            const chartW = Math.round(1552 * 2 / 3), chartX = 24 + Math.round((1552 - chartW) / 2);
+            G.chart(cv, t, chartX, y, chartW, h, {
                 xMin: t0, xMax: now, yMin: 0, yMax,
                 xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
                 yUnit: 'hp · Nm', yFmt: (yy) => String(Math.round(yy)),
