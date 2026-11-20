@@ -2,7 +2,7 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
@@ -525,8 +525,8 @@
           "at": 0,
           "factor": 0.02,
           "offset": 0,
-          "min": 0.5,
-          "max": 40,
+          "min": 20,
+          "max": 400,
           "note": "S_RAILDRUCKREGELUNG_NEU rail pressure setpoint, MPa -> bar (DME8FF_R)"
         },
         {
@@ -535,8 +535,8 @@
           "at": 0,
           "factor": 0.005,
           "offset": 0,
-          "min": 0.5,
-          "max": 40,
+          "min": 20,
+          "max": 400,
           "note": "S_RAILDRUCKREGELUNG rail pressure setpoint, MPa -> bar"
         }
       ],

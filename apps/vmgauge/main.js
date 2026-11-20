@@ -373,7 +373,8 @@ mgu.run({
         function chartFuel(cv, t, y, h) {
             const now = Date.now(), t0 = now - 30000;
             const hs = fuelHist.filter((p) => p.t >= t0);
-            G.chart(cv, t, 24, y, 1552, h, {
+            const chartW = Math.round(1552 * 2 / 3), chartX = 24 + Math.round((1552 - chartW) / 2);
+            G.chart(cv, t, chartX, y, chartW, h, {
                 xMin: t0, xMax: now, yMin: 0, yMax: 300,
                 xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
                 yUnit: 'bar', yFmt: (yy) => String(Math.round(yy)),
