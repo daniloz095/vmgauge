@@ -41,6 +41,7 @@ mgu.run({
         let lapEma = null;
         const LAP_TARGETS = [100, 200];
         const LAP_METRICS = ['boost', 'fuelPres', 'iat', 'egt', 'speed'];
+        const LAP_AUTO_STOP_SEC = 300;   // auto-stop after 5 minutes if the driver didn't
 
         // CSV logging
         const logState = { active: false, rows: 0, lastRowAt: 0, btnRect: null };
@@ -477,6 +478,12 @@ mgu.run({
             }
             if (lap.state !== 'running') return;
             const el = (Date.now() - lap.startedAt) / 1000;
+            // auto-stop after 5 minutes if the driver didn't press STOP
+            if (el >= LAP_AUTO_STOP_SEC) {
+                lap.state = 'done';
+                log.info('lap auto-stopped (' + LAP_AUTO_STOP_SEC + ' s timeout)');
+                return;
+            }
             const cur = num(lapEma) ? lapEma : 0;
             for (const tgt of LAP_TARGETS) if (!num(lap.crossed[tgt]) && cur >= tgt) { lap.crossed[tgt] = el; log.info('lap: 0-' + tgt + ' in ' + el.toFixed(2) + ' s'); }
             if (num(lap.crossed[100]) && num(lap.crossed[200])) lap.t100_200 = lap.crossed[200] - lap.crossed[100];
