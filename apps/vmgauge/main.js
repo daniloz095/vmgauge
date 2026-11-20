@@ -45,8 +45,9 @@ mgu.run({
         const logState = { active: false, rows: 0, lastRowAt: 0, btnRect: null };
 
         /* ---------------- signals (Car) ---------------- */
+        let bdsAt = 0;   // when BasicDataSet last sent a valid rear-axle torque share
         // extra watch: BasicDataSet's rear-axle torque share (0.01 % per bit, as live_data /
-        // M Vitals read it) - used to compute the xDrive lockup % when DID DB43 is unavailable
+        // car_vitals read it) - the primary source of the xDrive lockup % (100 - rear share)
         const car = new Car(ctx, ['rpm', 'speed', 'temps', 'torque'], {
             'de.bmw.infrastructure.analytics.BasicDataSet': {
                 basicDataSet: (bd) => {
@@ -57,7 +58,7 @@ mgu.run({
                     if (!okQ || typeof raw !== 'number' || raw === 0 || raw === 65535) return;
                     const rear = raw * 0.01;
                     if (rear < 0 || rear > 100) return;
-                    v.rearShare = rear;
+                    v.rearShare = rear; bdsAt = Date.now();
                 },
             },
         });
@@ -66,7 +67,7 @@ mgu.run({
         /* ---------------- DME over UDS ---------------- */
         const spec = ctx.spec.config || {};
         const dme = Object.assign({ ecu: 18 }, spec.dme || {});
-        const xcfg = Object.assign({ front: [], lockup: [] }, spec.xdrive || {});
+        const xcfg = Object.assign({ front: [] }, spec.xdrive || {});
         const link = new Diag(ctx.signals, log);
         link.quiet = true;
         const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 1200, maxConcurrent: 6 });
@@ -87,7 +88,7 @@ mgu.run({
         // so they are deliberately not in this list.
         const ALL = ['oilPressAbs', 'boost', 'iat', 'egt', 'lambda', 'mixtureAdapt', 'knockRetard',
             'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp', 'misfire',
-            'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase', 'lockup'];
+            'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
         // Poll tiers (Main re-layout): fast ~5/s, medium ~1/s, slow ~1/8s. A metric listed in a
         // tier keeps that cadence on every tab; anything else refreshes at STALE_BG.
         const FAST_SET = ['boost', 'mixtureAdapt', 'oilPressAbs', 'fuelPresAct', 'loadDirect'];
@@ -101,7 +102,7 @@ mgu.run({
             ign: ['ignAdv', 'knockRetard', 'lambda', 'mixtureAdapt'],
             fuelcool: ['iat', 'egt', 'gearbox', 'fuelTemp', 'radTemp'],
             elec: ['voltage', 'aluIst', 'aluTemp', 'battCurrent'],
-            tcase: ['tcase', 'lockup'],
+            tcase: ['tcase'],
             lap: ['boost', 'fuelPresAct', 'iat', 'egt'],
             more: ['boost', 'lambda'],
         };
@@ -212,12 +213,17 @@ mgu.run({
         }
 
         async function readMetricNow(metric) {
-            const list = metric === 'tcase' || metric === 'lockup' ? xcfg[metric] : dme[metric];
-            if (!Array.isArray(list) || !list.length) return;   // no candidates configured (e.g. lockup DB43 dropped until calibrated)
+            const list = metric === 'tcase' ? xcfg.front : dme[metric];
+            if (!Array.isArray(list) || !list.length) return;   // no candidates configured
             let val;
             if (metric === 'boost') { freshBaro(); val = await rd.value('boost', dme.boost); if (val !== null) val = (val - baro) / 100; }
-            else if (metric === 'tcase' || metric === 'lockup') val = await rd.value(metric, list);
             else val = await rd.value(metric, list);
+            if (metric === 'tcase') {
+                updateLmvPair();   // requested front torque + qualifier from the raw reply
+                const c = list[rd.pick.tcase || 0], rr = c && rd.raws[rd.key(c)];
+                const shape = rr ? (rr.bytes || rr.why) : null;
+                if (shape && !rawLog['lmv|' + shape]) { rawLog['lmv|' + shape] = true; log.info('LMV DB32 raw: ' + shape); }
+            }
             // log each candidate's raw reply, at most a few distinct shapes each (for calibration)
             const chosen = rd.pick[metric] || 0;
             list.forEach((c, i) => {
@@ -309,19 +315,41 @@ mgu.run({
             if (num(v.battCurrent) && v.battCurrent > 0) return v.battCurrent;
             return null;
         };
-        // xDrive lockup: the LMV's own torque split in % of the total axle torque.
-        // Primary source: DID DB43 (LMV_MOMENT.momentsollverteilung, 0.5 % per bit - the value
-        // the transfer case requests as front share; raw bytes are logged for calibration).
-        // Fallback: computed from the DB32 front torque and the BDS rear-axle share signal.
-        function bdsRearPct() { return num(v.rearShare) ? v.rearShare : null; }
+        // xDrive lockup: the torque split in % to the FRONT axle (car_vitals' method, upstream repo).
+        //   1. BasicDataSet valueDistributionLongitudinalTorqueRearAxisFrontAxis - the car's own
+        //      rear-axle share (0.01 % per bit, qualifier-gated, fresh < 10 s): lockup = 100 - rear.
+        //   2. The transfer case itself: DID 22 DB32 at LMV (address 0x19 = ecu 25) carries, after the
+        //      actual front torque (bytes 0-1), the REQUESTED front torque (bytes 4-5, Nm = raw/4).
+        //      While xDrive is active (requested-torque qualifier byte 7 is 0x20/0x21, not 0xE8-off)
+        //      the share is requested / (requested + rear axle torque) - the target split, which is
+        //      what 'lockup' means. Raw replies are logged for calibration.
+        function bdsRearPct() { return num(v.rearShare) && Date.now() - bdsAt < 10000 ? v.rearShare : null; }
+        // The LMV's own target split: from the raw DB32 reply - requested front torque (bytes 4-5,
+        // Nm = raw/4) against what the DME puts out (SOME/IP dd.torque). 'on' gates on the
+        // requested-torque qualifier (byte 7): 0x20/0x21 active, (q & 0xC0) == 0xC0 -> xDrive off.
+        const lmvPair = { req: null, on: false, at: 0 };
+        function updateLmvPair() {
+            const list = xcfg.front || [];
+            const c = list[rd.pick.tcase || 0];
+            const r = c && rd.raws[rd.key(c)];
+            if (!r || !r.bytes) return;
+            const b = r.bytes.split(' ');       // '62 DB 32 <act hi> <act lo> <qual hi> <qual lo> <req hi> <req lo> ...'
+            if (b.length < 8) return;
+            const reqRaw = (parseInt(b[6], 16) << 8 | parseInt(b[7], 16));
+            const reqSigned = reqRaw > 0x7FFF ? reqRaw - 0x10000 : reqRaw;
+            const qual = parseInt(b[7], 16) || 0;   // low byte of the requested-torque qualifier (as live_adjustments)
+            lmvPair.req = Math.abs(reqSigned) / 4;
+            lmvPair.on = (qual & 0xC0) !== 0xC0;
+            lmvPair.at = Date.now();
+        }
         function lockupPct() {
-            if (num(v.lockup)) return clamp(v.lockup, 0, 100);
-            const ft = num(v.tcase) ? Math.abs(v.tcase) : null;
             const rear = bdsRearPct();
-            if (ft === null || ft <= 0 || rear === null) return null;
+            if (rear !== null) return clamp(100 - rear, 0, 100);
+            if (lmvPair.req === null || !lmvPair.on || Date.now() - lmvPair.at > 5000) return null;
             const et = num(lastDd && lastDd.torque) && lastDd.torque > 0 ? lastDd.torque : null;
             if (et === null) return null;
-            return clamp(ft / (ft + et * (1 - rear / 100)) * 100, 0, 100);
+            const total = et + lmvPair.req;      // front share of (rear + front), rear approximated by engine torque
+            return clamp(lmvPair.req / total * 100, 0, 100);
         }
 
         function computePower(dd) {
@@ -395,7 +423,12 @@ mgu.run({
                 if (r.every((x) => /NRC 31|NRC 11|NRC 12/.test(x.why))) return 'not available on this car';
                 return (r[0].why || 'no data');
             }
-            const list = (k === 'tcase' || k === 'lockup') ? xcfg[k] : dme[k];
+            if (k === 'lockup') {
+                if (num(v.rearShare) && Date.now() - bdsAt < 10000) return 'no data';
+                if (lmvPair.req !== null) return lmvPair.on ? 'waiting for engine torque' : 'xDrive switched off';
+                return fuelWhy('tcase');
+            }
+            const list = k === 'tcase' ? xcfg.front : dme[k];
             const r = (list || []).map((c) => rd.raws[rd.key(c)]).filter(Boolean);
             if (!r.length) return 'reading...';
             if (r.every((x) => /NRC 31|NRC 11|NRC 12/.test(x.why))) return 'not available on this car';
@@ -555,7 +588,7 @@ mgu.run({
             const lk = lockupPct();
             const th = Math.round((G.BOTTOM - G.TOP) * 0.34);
             const w2 = Math.round((1552 - 24) / 2);
-            G.stat(cv, t, 24, G.TOP, w2, th, { label: 'Lockup', value: lk, unit: '%', decimals: 0, center: true, sub: num(lk) ? 'front-axle torque share' : fuelWhy('lockup') });
+            G.stat(cv, t, 24, G.TOP, w2, th, { label: 'Lockup', value: lk, unit: '%', decimals: 0, center: true, sub: num(lk) ? (bdsRearPct() !== null ? 'from the car\'s torque split' : 'target split (LMV)') : fuelWhy('lockup') });
             G.stat(cv, t, 24 + w2 + 24, G.TOP, w2, th, { label: 'Front axle torque', value: ft, unit: 'Nm', decimals: 0, center: true, sub: num(ft) ? 'transfer case (LMV)' : fuelWhy('tcase') });
             // bottom: lockup % over time, same placement as the power chart (2/3 width, centered)
             const y = G.TOP + th + 16, h = G.BOTTOM - y;

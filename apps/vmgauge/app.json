@@ -2,7 +2,7 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
@@ -773,7 +773,7 @@
       "note": "nominal max alternator output current (B58 water-cooled unit ~170A); used for the ALT LOAD % tile on the ELECTRIC tab"
     },
     "xdrive": {
-      "comment": "Front axle torque straight from the transfer case unit (LMV, address 0x19 = 25). LMV_MOMENT (22 DB32): actual torque to the front axle, signed, Nm = raw / 4 (bytes 0-1). The proven M Vitals source.",
+      "comment": "Front axle torque straight from the transfer case unit (LMV, address 0x19 = ecu 25). LMV_MOMENT (22 DB32): actual torque to the front axle, signed, Nm = raw / 4 (bytes 0-1); qualifier bytes 2-3; requested front torque bytes 4-5 (Nm = raw/4), its qualifier byte 7 says xDrive state (0x20/0x21 active, 0xE8 off). Lockup % = 100 - BasicDataSet rear-axle torque share when the car sends it; else requested/(engine torque + requested) from DB32.",
       "front": [
         {
           "ecu": 25,
@@ -786,8 +786,7 @@
           "max": 2500,
           "note": "LMV_MOMENT.ISTMOMENT, actual torque to the front axle"
         }
-      ],
-      "lockup": []
+      ]
     }
   }
 }
