@@ -27,11 +27,12 @@ mgu.run({
         ];
         let gTab = 'main';
         const v = {};                          // live DID values
-        const counters = { knock: 0 };
+        const counters = { knock: 0, misfire: 0 };
         const power = { hp: null, nm: null, peakHp: null, peakNm: null, peakAt: 0, stamp: 0, hist: [], lastPush: 0 };
         const fuelHist = [], fuelPush = { last: 0 };
         const ignHist = [], ignPush = { last: 0 };
         let prevKnock = false;
+        let prevMisfire = null;
         const boostPeak = { peak: null, peakAt: 0 };
 
         // lap timer: disarmed by default; ARM arms it, then it starts the moment the car moves
@@ -69,7 +70,17 @@ mgu.run({
         const ALL = ['oilPressAbs', 'boost', 'iat', 'egt', 'lambda', 'mixtureAdapt', 'knockRetard',
             'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp',
             'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
-        // The values the current tab shows, polled fast (~2-3/s) so nothing looks frozen.
+        // Update-rate tiers (ms). The MAIN screen's fast/medium tiles, and the active tab's metrics.
+        const FAST = ['boost', 'lambda', 'oilPressAbs', 'fuelPresAct'];   // 5/s
+        const MED = ['iat', 'egt', 'gearbox', 'voltage'];                 // 2/s
+        const RATE_FAST = 200, RATE_MED = 500, RATE_SLOW = 1000;
+        function rateOf(metric) {
+            if (FAST.indexOf(metric) >= 0) return RATE_FAST;
+            if (MED.indexOf(metric) >= 0) return RATE_MED;
+            if (gTab !== 'main' && (TAB_METRICS[gTab] || []).indexOf(metric) >= 0) return RATE_FAST;
+            return RATE_SLOW;
+        }
+        // The values the active tab shows (used only for the "active tab is fast" rule above).
         const TAB_METRICS = {
             main: ['boost', 'oilPressAbs', 'lambda', 'iat', 'gearbox', 'voltage', 'egt', 'loadDirect'],
             power: ['loadDirect', 'boost'],
@@ -83,7 +94,7 @@ mgu.run({
         };
 
         const fail = {}, tried = {}, rawLog = {}, rawCount = {};
-        let fastIdx = 0, slowIdx = 0, tickNo = 0;
+        const due = {};
 
         async function readMetric(metric) {
             const list = metric === 'tcase' ? xcfg.front : dme[metric];
@@ -115,17 +126,48 @@ mgu.run({
             if (metric === 'oilPressAbs') v.oilPress = num(val) && num(baro) ? val - baro / 100 : null;
         }
 
+        // Misfires per cylinder (OBD service 06 monitor, MIDs A2.. = cylinder 1..; tid 0C = this drive cycle).
+        let misMode = null;
+        async function readMisfire() {
+            const m = dme.misfire || {}, ecu = m.ecu == null ? dme.ecu : m.ecu, tid = parseInt(m.tid || '0C', 16);
+            if (misMode === null) {
+                if (await rd.monitor(ecu, 0xA2, false)) misMode = false;
+                else if (await rd.monitor(ecu, 0xA2, true)) misMode = true;
+                else { misMode = false; return; }
+            }
+            let total = 0, got = 0;
+            for (let c = 0; c < 6; c++) {
+                const res = await rd.monitor(ecu, 0xA2 + c, misMode);
+                if (!res) break;
+                const tr = res.find((x) => x.tid === tid) || res[0];
+                if (tr && tr.value < 65535) { total += tr.value; got++; }
+            }
+            if (got) v.misfireTotal = total;
+        }
+
+        let misfireAt = 0;
         async function pollLoop() {
             for (;;) {
+                const now = Date.now();
                 if (link.available) {
-                    tickNo++;
-                    const fast = TAB_METRICS[gTab];
-                    const doSlow = tickNo % 15 === 0;
-                    const queue = (doSlow || !fast || !fast.length) ? ALL : fast;
-                    const idx = doSlow ? slowIdx++ : fastIdx++;
-                    try { await readMetric(queue[idx % queue.length]); } catch (e) { log.warn('poll ' + queue[idx % queue.length] + ': ' + e); }
+                    // misfire monitor: slow (~once a second)
+                    if (now - misfireAt >= 1000) {
+                        misfireAt = now;
+                        try { await readMisfire(); } catch (e) { /* transport */ }
+                    }
+                    // the most-overdue DID metric
+                    let best = null, bestDue = Infinity;
+                    for (let i = 0; i < ALL.length; i++) {
+                        const m = ALL[i], dd = due[m] || 0;
+                        if (dd <= now && dd < bestDue) { best = m; bestDue = dd; }
+                    }
+                    if (best) {
+                        due[best] = now + rateOf(best);
+                        try { await readMetric(best); } catch (e) { log.warn('poll ' + best + ': ' + e); }
+                        continue;
+                    }
                 }
-                await new Promise((res) => setTimeout(res, link.available ? 350 : 1000));
+                await new Promise((res) => setTimeout(res, link.available ? 40 : 1000));
             }
         }
         pollLoop();
@@ -216,6 +258,13 @@ mgu.run({
             if (active && !prevKnock && num(boostBar()) && boostBar() > 0.5) counters.knock++;
             prevKnock = active;
         }
+        function handleMisfire() {
+            const tot = v.misfireTotal;
+            if (num(tot) && num(prevMisfire) && tot > prevMisfire && num(boostBar()) && boostBar() > 0.5) {
+                counters.misfire += tot - prevMisfire;
+            }
+            if (num(tot)) prevMisfire = tot;
+        }
 
         function boostGaugeStep() {
             const now = Date.now(), b = boostBar();
@@ -252,23 +301,48 @@ mgu.run({
                 else if (g) G.stat(cv, t, b.x, b.y, b.w, b.h, Object.assign({ size: b.h > 200 ? 96 : 64 }, g));
             });
         }
+        /** Tile with the value centred in the middle (panel chrome, title top-left). */
+        function centeredTile(cv, t, x, y, w, h, label, val, dp, unit, col, sub) {
+            G.panel(cv, t, x, y, w, h, label);
+            const txt = num(val) ? val.toFixed(dp) : '--';
+            const size = Math.min(88, Math.round(h * 0.46));
+            const base = y + h * 0.55 + size * 0.36;
+            const color = num(val) ? col : t.dim;
+            const vw = cv.textWidth(txt, size, { font: 'num' });
+            const ustr = unit || '';
+            const usz = Math.max(18, Math.round(size * 0.38));
+            const uw = ustr ? cv.textWidth(ustr, usz) : 0;
+            const total = vw + (uw ? uw + 8 : 0);
+            const left = x + w / 2 - total / 2;
+            cv.text(txt, left, base, size, color, { font: 'num' });
+            if (ustr) cv.text(ustr, left + vw + 8, base, usz, t.dim);
+            if (sub) cv.text(sub, x + w / 2, y + h - 16, 18, t.dim, { align: 'center' });
+        }
 
         /* ---------------- tabs ---------------- */
         function drawMain(cv, t, dd) {
-            drawTiles(cv, t, [
-                { label: 'Boost', value: boostBar(), unit: 'bar', decimals: 2, zones: [{ from: 0.05, to: 99, color: 'ok' }] },
-                { label: 'AFR', value: afr(), decimals: 1 },
-                { label: 'Oil pressure', value: oilPress(), unit: 'bar', decimals: 1, zones: [{ from: -99, to: 1.2, color: 'crit' }] },
-                { label: 'Intake air', value: T(v.iat), unit: tU(), decimals: 0, zones: [{ from: T(65), to: 999, color: 'crit' }] },
-                { label: 'Coolant', value: T(dd.coolant), unit: tU(), decimals: 0, zones: [{ from: T(112), to: 999, color: 'crit' }, { from: -99, to: T(60), color: 'cold' }] },
-                { label: 'Engine oil', value: T(dd.oil), unit: tU(), decimals: 0, color: 'oil', zones: [{ from: T(125), to: 999, color: 'crit' }] },
-                { label: 'Gearbox oil', value: T(v.gearbox), unit: tU(), decimals: 0, zones: [{ from: T(120), to: 999, color: 'warn' }] },
-                { label: 'Voltage', value: v.voltage, unit: 'V', decimals: 1, zones: [{ from: -99, to: 12, color: 'warn' }, { from: 15.5, to: 99, color: 'warn' }] },
-                { label: 'Knock count', value: counters.knock, decimals: 0 },
-                { label: 'EGT', value: T(v.egt), unit: tU(), decimals: 0, zones: [{ from: T(950), to: 999, color: 'crit' }] },
-                { label: 'Air charge', value: loadPct(), unit: '%', decimals: 0 },
-                { label: 'Fuel rail', value: fuelPresAct(), unit: 'bar', decimals: 0, zones: [{ from: -99, to: 20, color: 'crit' }] },
-            ]);
+            // [label, value, decimals, unit, color] — 3 rows x 4 columns, values centred
+            const rows = [
+                // row 1 — fast
+                ['Boost', boostBar(), 2, 'bar', num(boostBar()) && boostBar() > 0.05 ? t.accent : t.text],
+                ['Mixture', afr(), 1, '', t.text],
+                ['Oil press', oilPress(), 1, 'bar', num(oilPress()) && oilPress() < 1.2 ? t.crit : t.text],
+                ['Knock', counters.knock, 0, '', counters.knock > 0 ? t.warn : t.text],
+                // row 2 — medium
+                ['Intake', T(v.iat), 0, tU(), num(v.iat) && v.iat > 65 ? t.crit : t.text],
+                ['Exhaust', T(v.egt), 0, tU(), num(v.egt) && v.egt > 950 ? t.crit : t.text],
+                ['Gearbox', T(v.gearbox), 0, tU(), num(v.gearbox) && v.gearbox > 120 ? t.warn : t.text],
+                ['Misfire', counters.misfire, 0, '', counters.misfire > 0 ? t.warn : t.text],
+                // row 3 — mixed
+                ['Coolant', T(dd.coolant), 0, tU(), num(dd.coolant) && dd.coolant > 112 ? t.crit : t.text],
+                ['Oil temp', T(dd.oil), 0, tU(), num(dd.oil) && dd.oil > 125 ? t.crit : t.text],
+                ['Voltage', v.voltage, 1, 'V', num(v.voltage) && (v.voltage < 12 || v.voltage > 15.5) ? t.warn : t.text],
+                ['Fuel rail', fuelPresAct(), 0, 'bar', num(fuelPresAct()) && fuelPresAct() < 20 ? t.crit : t.text],
+            ];
+            grid(rows.length).forEach((b, i) => {
+                const g = rows[i];
+                centeredTile(cv, t, b.x, b.y, b.w, b.h, g[0], g[1], g[2], g[3], g[4], null);
+            });
         }
 
         function drawPower(cv, t, dd) {
@@ -487,6 +561,7 @@ mgu.run({
             v.rpm = dd.rpm; v.coolant = dd.coolant; v.oilTemp = dd.oil; v.speed = dd.speed;
             computePower(dd);
             handleKnock();
+            handleMisfire();
             lapStep(dd);
             boostGaugeStep();
             loggingStep(dd);
