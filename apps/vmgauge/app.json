@@ -2,7 +2,7 @@
   "id": "vmgauge",
   "title": "VMGauge",
   "description": "Boost, temperatures, oil pressure, lambda, knock and misfire counters for the MGU (iDrive 7)",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "vendor": "custom",
   "loggingId": "OAA1",
   "iconGlyph": "gauge",
@@ -720,18 +720,30 @@
           "min": -50,
           "max": 400,
           "note": "IIGEN generator output current, A (DME8FF_R)"
+        },
+        {
+          "did": "598A",
+          "bytes": 2,
+          "at": 0,
+          "signed": true,
+          "factor": 0.125,
+          "offset": 0,
+          "min": -50,
+          "max": 400,
+          "note": "Output current of the electric machine (alternative generator-current DID)"
         }
       ],
       "aluTemp": [
         {
-          "did": "5854",
-          "bytes": 1,
+          "did": "5844",
+          "bytes": 2,
           "at": 0,
-          "factor": 0.75,
-          "offset": -48,
+          "signed": true,
+          "factor": 1,
+          "offset": 0,
           "min": -40,
-          "max": 90,
-          "note": "BATT_TEMP battery (IBS) temperature, deg C (DME8FF_R) - shown on the ELEC tab"
+          "max": 200,
+          "note": "Chip temperature of the machine (generator/alternator regulator), deg C"
         }
       ],
       "loadTarget": [

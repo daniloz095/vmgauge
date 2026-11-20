@@ -430,7 +430,7 @@ mgu.run({
                 { label: 'Voltage', value: v.voltage, unit: 'V', decimals: 1, zones: [{ from: -99, to: 12, color: 'warn' }, { from: 15.5, to: 99, color: 'warn' }] },
                 { label: 'Alt load', value: alternatorLoadPct(), unit: '%', decimals: 0, sub: num(alternatorLoadPct()) ? 'alternator output' : fuelWhy('aluIst') },
                 { label: 'Output', value: alternatorOutputA(), unit: 'A', decimals: 0, sub: num(alternatorOutputA()) ? 'generator current' : fuelWhy('aluIst') },
-                { label: 'Batt temp', value: T(v.aluTemp), unit: tU(), decimals: 0, sub: num(v.aluTemp) ? 'battery (IBS)' : fuelWhy('aluTemp') },
+                { label: 'Alt temp', value: T(v.aluTemp), unit: tU(), decimals: 0, sub: num(v.aluTemp) ? 'generator chip' : fuelWhy('aluTemp') },
             ]);
         }
 
