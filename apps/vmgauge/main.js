@@ -59,7 +59,7 @@ mgu.run({
         const xcfg = Object.assign({ front: [] }, spec.xdrive || {});
         const link = new Diag(ctx.signals, log);
         link.quiet = true;
-        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 1200 });
+        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 800 });
         link.init().catch((e) => log.warn('diag init: ' + e));
 
         let baro = 101.3, baroT = 0;
@@ -75,19 +75,12 @@ mgu.run({
         const ALL = ['oilPressAbs', 'boost', 'iat', 'egt', 'lambda', 'mixtureAdapt', 'knockRetard',
             'loadDirect', 'fuelPresAct', 'fuelPresReq', 'ignAdv', 'fuelTemp',
             'radTemp', 'gearbox', 'voltage', 'battCurrent', 'aluIst', 'aluTemp', 'tcase'];
-        // Update-rate tiers (ms). The MAIN screen's fast/medium tiles, and the active tab's metrics.
-        const FAST = ['boost', 'lambda', 'oilPressAbs', 'fuelPresAct'];   // 5/s
-        const MED = ['iat', 'egt', 'gearbox', 'voltage'];                 // 2/s
-        const RATE_FAST = 200, RATE_MED = 500, RATE_SLOW = 1000;
-        function rateOf(metric) {
-            if (FAST.indexOf(metric) >= 0) return RATE_FAST;
-            if (MED.indexOf(metric) >= 0) return RATE_MED;
-            if (gTab !== 'main' && (TAB_METRICS[gTab] || []).indexOf(metric) >= 0) return RATE_FAST;
-            return RATE_SLOW;
-        }
-        // The values the active tab shows (used only for the "active tab is fast" rule above).
+        // Update-rate tiers: fast metrics polled ~3x as often, medium ~2x, the rest 1x (in the active tab's queue).
+        const FAST = ['boost', 'lambda', 'oilPressAbs', 'fuelPresAct'];
+        const MED = ['iat', 'egt', 'gearbox', 'voltage'];
+        // The DID metrics the active tab shows (coolant/oil come from CDS signals; misfire is a monitor).
         const TAB_METRICS = {
-            main: ['boost', 'oilPressAbs', 'lambda', 'iat', 'gearbox', 'voltage', 'egt', 'loadDirect'],
+            main: ['boost', 'lambda', 'oilPressAbs', 'knockRetard', 'iat', 'egt', 'gearbox', 'voltage', 'fuelPresAct'],
             power: ['loadDirect', 'boost'],
             hpfp: ['fuelPresAct', 'fuelPresReq'],
             ign: ['ignAdv', 'knockRetard', 'lambda', 'mixtureAdapt'],
@@ -99,7 +92,6 @@ mgu.run({
         };
 
         const fail = {}, tried = {}, rawLog = {}, rawCount = {};
-        const due = {};
 
         async function readMetric(metric) {
             const list = metric === 'tcase' ? xcfg.front : dme[metric];
@@ -150,29 +142,34 @@ mgu.run({
             if (got) v.misfireTotal = total;
         }
 
-        let misfireAt = 0;
+        // Poll queue: the active tab's metrics weighted (fast 3x, medium 2x, rest 1x), one read per
+        // tick, throttled to ~4/s so the TASU transport isn't overloaded (that caused the "no reply"
+        // stalls); a background metric every ~5 s keeps the other tabs fresh.
+        let wq = [], qi = 0, bgIdx = 0, lastBg = 0, misfireAt = 0;
+        function rebuildQueue() {
+            wq = [];
+            const tab = TAB_METRICS[gTab] || [];
+            for (const m of tab) {
+                const w = FAST.indexOf(m) >= 0 ? 3 : MED.indexOf(m) >= 0 ? 2 : 1;
+                for (let i = 0; i < w; i++) wq.push(m);
+            }
+            qi = 0;
+        }
+        rebuildQueue();
+
         async function pollLoop() {
             for (;;) {
                 const now = Date.now();
                 if (link.available) {
-                    // the most-overdue DID metric (priority, so fast metrics stay fast)
-                    let best = null, bestDue = Infinity;
-                    for (let i = 0; i < ALL.length; i++) {
-                        const m = ALL[i], dd = due[m] || 0;
-                        if (dd <= now && dd < bestDue) { best = m; bestDue = dd; }
+                    if (now - lastBg >= 5000) {
+                        lastBg = now;
+                        try { await readMetric(ALL[bgIdx++ % ALL.length]); } catch (e) { log.warn('poll bg: ' + e); }
+                    } else if (wq.length) {
+                        try { await readMetric(wq[qi++ % wq.length]); } catch (e) { log.warn('poll: ' + e); }
                     }
-                    if (best) {
-                        due[best] = now + rateOf(best);
-                        try { await readMetric(best); } catch (e) { log.warn('poll ' + best + ': ' + e); }
-                        // misfire monitor: slow, only after a DID read, and only every ~2 s
-                        if (Date.now() - misfireAt >= 2000) {
-                            misfireAt = Date.now();
-                            try { await readMisfire(); } catch (e) { /* transport */ }
-                        }
-                        continue;
-                    }
+                    if (now - misfireAt >= 5000) { misfireAt = now; try { await readMisfire(); } catch (e) { /* transport */ } }
                 }
-                await new Promise((res) => setTimeout(res, link.available ? 40 : 1000));
+                await new Promise((res) => setTimeout(res, link.available ? 150 : 1000));
             }
         }
         pollLoop();
@@ -360,12 +357,25 @@ mgu.run({
             });
         }
 
+        function powerBar(cv, t, x, y, w, h, label, val, unit, peak, hot) {
+            // header: label left, current value + unit right, peak number under the value
+            cv.text(label.toUpperCase(), x, y + 22, 20, t.dim, { font: 'bold', spacing: 2 });
+            const vt = num(val) ? String(Math.round(val)) : '--';
+            const vcol = num(val) ? t.text : t.dim;
+            const uw = cv.textWidth(' ' + unit, 22);
+            cv.text(vt, x + w - uw, y + 28, 40, vcol, { align: 'right', font: 'num' });
+            cv.text(' ' + unit, x + w, y + 28, 22, t.dim, { align: 'right' });
+            cv.text('PEAK ' + (num(peak) ? String(Math.round(peak)) : '--'), x + w, y + 50, 18, t.accent2, { align: 'right' });
+            // bar body (with the peak hang marker)
+            G.bar(cv, t, x, y + 58, w, h - 58, { head: false, value: val, min: 0, max: 600, ramp: hot ? 'hot' : undefined, peak: peak });
+        }
+
         function drawPower(cv, t, dd) {
             const fresh = num(power.hp) && Date.now() - power.stamp < 3000;
             const hp = fresh ? power.hp : null, nm = fresh ? power.nm : null;
-            const barH = 110, gap = 12;
-            G.bar(cv, t, 24, G.TOP, 1552, barH, { label: 'Power', value: hp, unit: 'hp', decimals: 0, min: 0, max: 600, ramp: 'hot', peak: power.peakHp });
-            G.bar(cv, t, 24, G.TOP + barH + gap, 1552, barH, { label: 'Torque', value: nm, unit: 'Nm', decimals: 0, min: 0, max: 600, peak: power.peakNm });
+            const barH = 128, gap = 12;
+            powerBar(cv, t, 24, G.TOP, 1552, barH, 'Power', hp, 'hp', power.peakHp, true);
+            powerBar(cv, t, 24, G.TOP + barH + gap, 1552, barH, 'Torque', nm, 'Nm', power.peakNm, false);
             const y = G.TOP + 2 * (barH + gap), h = G.BOTTOM - y;
             const now = Date.now(), t0 = now - 30000;
             const hs = power.hist.filter((p) => p.t >= t0);
@@ -710,7 +720,7 @@ mgu.run({
         }
         ctx.loop('MAIN', 10, render);
 
-        ctx.onTab((i) => { if (i >= 0 && i < TABS.length) gTab = TABS[i].id; });
+        ctx.onTab((i) => { if (i >= 0 && i < TABS.length) { gTab = TABS[i].id; rebuildQueue(); } });
         const inRect = (r, x, y) => r && x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3];
         let lastBtnTap = 0;
         ctx.onTap((x, y) => {
