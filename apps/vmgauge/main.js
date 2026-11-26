@@ -31,6 +31,7 @@ mgu.run({
         const counters = { knock: 0, misfire: 0 };
         const power = { hp: null, nm: null, peakHp: null, peakNm: null, peakAt: 0, stamp: 0, hist: [], lastPush: 0 };
         const fuelHist = [], fuelPush = { last: 0 };
+        const fuelReqHist = [], fuelReqPush = { last: 0 };
         const ignHist = [], ignPush = { last: 0 };
         const tcaseHist = [], tcasePush = { last: 0 };
         let prevKnock = false;
@@ -59,7 +60,7 @@ mgu.run({
         const xcfg = Object.assign({ front: [] }, spec.xdrive || {});
         const link = new Diag(ctx.signals, log);
         link.quiet = true;
-        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 800 });
+        const rd = new DidReader(link, { ecu: dme.ecu, timeoutMs: 600 });
         link.init().catch((e) => log.warn('diag init: ' + e));
 
         let baro = 101.3, baroT = 0;
@@ -142,15 +143,15 @@ mgu.run({
             if (got) v.misfireTotal = total;
         }
 
-        // Poll queue: the active tab's metrics weighted (fast 3x, medium 2x, rest 1x), one read per
-        // tick, throttled to ~4/s so the TASU transport isn't overloaded (that caused the "no reply"
-        // stalls); a background metric every ~5 s keeps the other tabs fresh.
+        // Poll queue: the active tab's metrics weighted (fast 6x, medium 3x, rest 1x), one read per
+        // tick. The read itself throttles (a DID round-trip); a tiny gap keeps instant replies from
+        // hammering the transport. A background metric every ~10 s keeps the other tabs fresh.
         let wq = [], qi = 0, bgIdx = 0, lastBg = 0, misfireAt = 0;
         function rebuildQueue() {
             wq = [];
             const tab = TAB_METRICS[gTab] || [];
             for (const m of tab) {
-                const w = FAST.indexOf(m) >= 0 ? 3 : MED.indexOf(m) >= 0 ? 2 : 1;
+                const w = FAST.indexOf(m) >= 0 ? 6 : MED.indexOf(m) >= 0 ? 3 : 1;
                 for (let i = 0; i < w; i++) wq.push(m);
             }
             qi = 0;
@@ -161,15 +162,15 @@ mgu.run({
             for (;;) {
                 const now = Date.now();
                 if (link.available) {
-                    if (now - lastBg >= 5000) {
+                    if (now - lastBg >= 10000) {
                         lastBg = now;
                         try { await readMetric(ALL[bgIdx++ % ALL.length]); } catch (e) { log.warn('poll bg: ' + e); }
                     } else if (wq.length) {
                         try { await readMetric(wq[qi++ % wq.length]); } catch (e) { log.warn('poll: ' + e); }
                     }
-                    if (now - misfireAt >= 5000) { misfireAt = now; try { await readMisfire(); } catch (e) { /* transport */ } }
+                    if (now - misfireAt >= 15000) { misfireAt = now; try { await readMisfire(); } catch (e) { /* transport */ } }
                 }
-                await new Promise((res) => setTimeout(res, link.available ? 150 : 1000));
+                await new Promise((res) => setTimeout(res, link.available ? 30 : 1000));
             }
         }
         pollLoop();
@@ -249,6 +250,14 @@ mgu.run({
                 const fc = now - 30000;
                 while (fuelHist.length && fuelHist[0].t < fc) fuelHist.shift();
                 if (fuelHist.length > 600) fuelHist.splice(0, fuelHist.length - 600);
+            }
+            const rp = fuelPresReq();
+            if (num(rp) && now - fuelReqPush.last > 200) {
+                fuelReqPush.last = now;
+                fuelReqHist.push({ t: now, bar: rp });
+                const rc = now - 30000;
+                while (fuelReqHist.length && fuelReqHist[0].t < rc) fuelReqHist.shift();
+                if (fuelReqHist.length > 600) fuelReqHist.splice(0, fuelReqHist.length - 600);
             }
         }
         function peakTorqueNm(rpm) {
@@ -398,12 +407,16 @@ mgu.run({
         function chartFuel(cv, t, y, h) {
             const now = Date.now(), t0 = now - 30000;
             const hs = fuelHist.filter((p) => p.t >= t0);
+            const rs = fuelReqHist.filter((p) => p.t >= t0);
             const chartW = Math.round(1552 * 2 / 3), chartX = 24 + Math.round((1552 - chartW) / 2);
             G.chart(cv, t, chartX, y, chartW, h, {
                 xMin: t0, xMax: now, yMin: 0, yMax: 300,
                 xStep: 10000, xFmt: (xx) => Math.round((xx - now) / 1000) + 's',
                 yUnit: 'bar', yFmt: (yy) => String(Math.round(yy)),
-                series: [{ pts: hs.map((p) => [p.t, p.bar]), color: 'accent', width: 2.5, fill: 0.14 }],
+                series: [
+                    { pts: hs.map((p) => [p.t, p.bar]), color: 'accent', width: 2.5, fill: 0.14 },
+                    { pts: rs.map((p) => [p.t, p.bar]), color: '#3aa0ff', width: 2, dash: true },
+                ],
                 empty: 'no rail pressure data',
             });
         }
